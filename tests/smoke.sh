@@ -786,6 +786,23 @@ check '无配置时 vm render 报码 3（缺身份，而不是崩）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" vm render
 check '无配置时 host-gpu 真跑报码 3（缺 BDF）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
+printf '\n== 26. 报告值必须与实际一致（曾经输出过错误的 amdgpu_loaded）==\n'
+# 曾经的 bug：`lsmod | grep -q` 在 pipefail 下因 SIGPIPE(141) 永远判失败 →
+# amdgpu_loaded 恒为 no。现在改成直接读 /proc/modules，并与实际对拍。
+detail=$(bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_conf_load; wb_host_gpu_detail")
+want_modules=$(grep -q '^amdgpu' /proc/modules 2>/dev/null && echo yes || echo no)
+want_bound=$(awk '$1=="amdgpu"{print $3}' /proc/modules 2>/dev/null || echo 0)
+want_bound=${want_bound:-0}
+has "amdgpu_loaded 与实际一致（$want_modules）" "$detail" "amdgpu_loaded=$want_modules"
+has "amdgpu_bound 与实际一致（$want_bound）" "$detail" "amdgpu_bound=$want_bound"
+want_driver=$(basename "$(readlink -f "/sys/bus/pci/devices/$(   bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/conf.sh'; wb_conf_load; wb_conf_get_default WB_GPU_BDF ''" )/driver" 2>/dev/null)" 2>/dev/null || echo '(none)')
+has "driver 与实际一致（$want_driver）" "$detail" "driver=$want_driver"
+
+# 结构性守卫：`cmd | grep -q` 在 pipefail 脚本里必错（grep -q 提前退出 → 上游 SIGPIPE）
+check 'scripts/ 里没有 `| grep -q` 这种写法（注释除外）' 0 bash -c "
+  cd '$WB_ROOT'
+  ! grep -rnE '\| *grep -q' scripts/ | grep -vE ':[0-9]+: *#'"
+
 printf '\n== 25. host-gpu：开机脚本探测 + live 修复的回归守卫 ==\n'
 # 夹具：模拟"别人写的开机绑定脚本"（enabled 与未启用各一）
 BSD="$TMP/sysd"

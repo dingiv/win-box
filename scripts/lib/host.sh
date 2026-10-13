@@ -131,10 +131,13 @@ wb_host_gpu_detail() {
   printf 'vfio_ids=%s\n' "$ids"
   printf 'softdep=%s\n' "$sd"
   printf 'blacklisted=%s\n' "$bl（仅记录：拦不住显式 modprobe，且设备已被 vfio-pci 认领，无实际作用）"
+  printf 'amdgpu_bound=%s\n' "$(awk '$1=="amdgpu"{print $3}' /proc/modules 2>/dev/null || echo 0)"
   printf 'bootlist_amdgpu=%s\n' "$(wb_host_gpu_amdgpu_in_bootlist && echo yes || echo no)"
   printf 'bootlist_vfio=%s\n' "$(wb_host_gpu_vfio_in_bootlist && echo yes || echo no)"
   printf 'driver=%s\n' "$drv"
-  printf 'amdgpu_loaded=%s\n' "$(lsmod 2>/dev/null | grep -q '^amdgpu' && echo yes || echo no)"
+  # 注意：不要写成 `lsmod | grep -q` —— grep -q 命中即退出会让 lsmod 收 SIGPIPE(141)，
+  # 在 pipefail 下整条管道被判失败，于是永远输出 no（踩过；直接读 /proc/modules 没这个坑）
+  printf 'amdgpu_loaded=%s\n' "$(grep -q '^amdgpu' /proc/modules 2>/dev/null && echo yes || echo no)"
   printf 'framebuffer_in_use=%s\n' "$(wb_host_gpu_amdgpu_in_use && echo yes || echo no)"
 }
 

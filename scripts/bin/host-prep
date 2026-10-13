@@ -177,7 +177,8 @@ else
   need=()
   for g in kvm libvirt; do
     getent group "$g" >/dev/null 2>&1 || { wb_warn "组 $g 不存在（libvirt 装了吗？）"; continue; }
-    id -nG "$target" | tr ' ' '\n' | grep -qx "$g" || need+=("$g")
+    # 用原生 bash 匹配，避免 `... | grep -q`（grep -q 命中即退出 → 上游可能收 SIGPIPE）
+    [[ " $(id -nG "$target") " == *" $g "* ]] || need+=("$g")
   done
   if (( ${#need[@]} == 0 )); then
     wb_ok "$target 已在 kvm、libvirt 组"
