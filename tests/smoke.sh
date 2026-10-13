@@ -569,10 +569,21 @@ check 'dump 非 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" rom dump --bdf 0
 
 printf '\n== 21. host-prep 与 vm-create ==\n'
 # 21.1 host-prep 干跑：只读检查，非 root 也应能跑完（让人先看清"会改什么"再决定 sudo）
-out=$("$WB_ROOT/scripts/bin/winbox" -n host-prep 2>&1); rc=$?
+# 用隔离配置（克隆体里没有 config/win-box.conf，别让测试依赖本机状态）
+HP_CFG="$TMP/hp.conf"
+{
+  printf '%s\n' 'WB_VM_NAME=testbox' 'WB_VM_UUID=11111111-2222-3333-4444-555555555555' 'WB_VM_DISK=/tmp/hp.qcow2'
+  [[ -n $GBDF ]] && printf 'WB_GPU_BDF=%s\n' "$GBDF"
+  [[ -n $ABDF ]] && printf 'WB_AUDIO_BDF=%s\n' "$ABDF"
+} > "$HP_CFG"
+out=$(WB_CONF_PATH="$HP_CFG" "$WB_ROOT/scripts/bin/winbox" -n host-prep 2>&1); rc=$?
 if [[ $rc == 0 || $rc == 5 ]]; then ok "winbox -n host-prep 正常退出（码 $rc）"; else bad "winbox -n host-prep 异常（码 $rc）"; printf '%s\n' "$out" | sed 's/^/      /'; fi
 has 'host-prep 干跑走到最后一步' "$out" '== 6/6'
-has 'host-prep 检查 initramfs 里的 amdgpu（关键坑）' "$out" 'initramfs 模块表'
+if [[ -n $GBDF ]]; then
+  has 'host-prep 检查 initramfs 里的 amdgpu（关键坑）' "$out" 'initramfs 模块表'
+else
+  ok '本机无 AMD 核显：跳过 initramfs 断言'
+fi
 has 'host-prep 检查内核参数' "$out" '内核参数'
 check 'host-prep 真跑需要 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-prep
 
@@ -697,17 +708,57 @@ has 'host-gpu status 报出姿态' "$out" 'mode'
 has 'host-gpu status 报出核显驱动' "$out" 'driver'
 check '未知动作 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" host-gpu nonsense
 check '真跑需 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
-# 本机确实存在"别人的文件里也有黑名单"的情况（blacklist.conf），
-# 因此不带 --takeover 的 host 切换应当以码 3 拒绝，并提示 --takeover
-out=$("$WB_ROOT/scripts/bin/winbox" -n host-gpu host 2>&1); rc=$?
+# 命令层的冲突处理：用**夹具目录**驱动（不读本机 /etc、不依赖本机配置）
+HGC="$TMP/hg-cmd"
+mkdir -p "$HGC"
+printf '%s\n' 'blacklist amdgpu' 'options vfio-pci ids=1002:13c0' > "$HGC/10-test.conf"
+printf '%s\n' 'blacklist amdgpu' > "$HGC/20-other.conf"
+hg_cmd() { env WB_CONF_PATH="$TMP/render.conf" WB_GPU_BDF=0000:01:00.0 WB_AUDIO_BDF=0000:01:00.1 \
+             WB_HOST_GPU_DIR="$HGC" WB_HOST_GPU_MANAGED="$HGC/10-test.conf" \
+             WB_HOST_GPU_MODFILE="$HGC/modules" WB_HOST_GPU_LOADFILE="$HGC/load.conf" \
+             "$WB_ROOT/scripts/bin/winbox" "$@"; }
+out=$(hg_cmd -n host-gpu host 2>&1); rc=$?
 if [[ $rc == 3 ]]; then
   ok '有冲突且未给 --takeover → 码 3（拒绝执行）'
   has '冲突提示里给出 --takeover 的用法' "$out" '--takeover'
 else
-  bad "期望码 3（存在冲突配置），实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
+  bad "期望码 3（夹具里有冲突），实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
 fi
-check '带 --takeover 的干跑可以走完（仍不落盘）' 0 "$WB_ROOT/scripts/bin/winbox" -n host-gpu host --takeover
+check '带 --takeover 的干跑可以走完（仍不落盘）' 0 hg_cmd -n host-gpu host --takeover
+fixture_lines=$(wc -l < "$HGC/10-test.conf")
+fixture_other=$(tr -d '\n' < "$HGC/20-other.conf")
+if [[ $fixture_lines == 2 && $fixture_other == 'blacklist amdgpu' ]]; then
+  ok '夹具里的文件一个没被改动（干跑不落盘）'
+else
+  bad "干跑改动了夹具文件（行数=$fixture_lines，另一个=$fixture_other）"
+fi
 
+
+printf '\n== 24. 没有配置时的健壮性（陌生人 clone 后的第一分钟）==\n'
+# 克隆体里没有 config/win-box.conf（它被 gitignore）：任何命令都不该出现
+# bash 内部错误，而应该给出可行动的报错（码 3）或降级说明。
+NOCONF="$TMP/definitely-absent.conf"
+while IFS= read -r spec; do
+  [[ -n $spec ]] || continue
+  # shellcheck disable=SC2086  # 故意按空格拆开命令名与参数
+  out=$(env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" $spec 2>&1); rc=$?
+  if grep -qE 'unbound variable|command not found|syntax error near' <<< "$out"; then
+    bad "无配置时 `winbox $spec` 出现 bash 内部错误"
+    printf '%s\n' "$out" | head -3 | sed 's/^/      /'
+  else
+    ok "无配置时 \`winbox $spec\` 行为正常（码 $rc）"
+  fi
+done <<'SPECS'
+conf
+detect
+host-gpu status
+status --host
+vm render
+SPECS
+check '无配置时 vm render 报码 3（缺身份，而不是崩）' 3 \
+  env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" vm render
+check '无配置时 host-gpu 真跑报码 3（缺 BDF）' 3 \
+  env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
 printf '\n== 23. 仓库根入口 winbox ==\n'
 check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"
 check '根入口已被 git 跟踪' 0 bash -c "cd '$WB_ROOT' && git ls-files --error-unmatch winbox >/dev/null"
@@ -717,8 +768,10 @@ check '从其它目录用绝对路径也能跑' 0 bash -c "cd /tmp && '$WB_ROOT/
 
 # 软链：根入口会解析真实路径，所以软链进 PATH 后仍能找到仓库
 ln -sf "$WB_ROOT/winbox" "$TMP/winbox-link"
-a=$("$TMP/winbox-link" conf WB_VM_NAME 2>/dev/null || true)
-b=$("$WB_ROOT/scripts/bin/winbox" conf WB_VM_NAME 2>/dev/null || true)
+SYM_CFG="$TMP/sym.conf"
+printf '%s\n' 'WB_VM_NAME=symtest' 'WB_VM_UUID=11111111-2222-3333-4444-555555555555' 'WB_VM_DISK=/tmp/sym.qcow2' > "$SYM_CFG"
+a=$(WB_CONF_PATH="$SYM_CFG" "$TMP/winbox-link" conf WB_VM_NAME 2>/dev/null || true)
+b=$(WB_CONF_PATH="$SYM_CFG" "$WB_ROOT/scripts/bin/winbox" conf WB_VM_NAME 2>/dev/null || true)
 if [[ -n $a && $a == "$b" ]]; then ok "通过软链也能定位仓库（读到同一份配置：$a）"; else bad "软链下定位失败（'$a' vs '$b'）"; fi
 
 # 薄壳不变量：根入口不该长出第二份实现（否则两边迟早不一致）
