@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # code-master:title win-box · 核显专用操作（lib/gpu.sh）
 #
-# 契约：docs/interfaces/04-lib-api.md ／ 链路：docs/calltrees/03-vm-start-and-reset-hook.md
+# 契约：docs/interfaces/04-lib-api.md ／ 链路：docs/calltrees/03-vm-start-and-reset.md
 #
 # 本文件只有一个"主角"：wb_gpu_reset_cycle —— 用 amdgpu 做一次真复位（MODE2 reset），
 # 让 AMD 核显从"脏状态"回到可被 vfio-pci 交付给客机的状态。

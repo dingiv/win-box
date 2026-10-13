@@ -74,7 +74,7 @@ vm_status() {
 }
 
 snapshot_warn_restore() {
-  wb_hint '回滚后第一次启动可能需要复位钩子或冷启动宿主（核显复位 bug）'
+  wb_hint '回滚后第一次启动建议 sudo ./winbox vm start（它会先做一次核显真复位）'
 }
 
 CMD=${1:-}

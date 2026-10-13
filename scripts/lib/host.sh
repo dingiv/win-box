@@ -20,7 +20,7 @@
 #        `options vfio-pci ids=…`（认领）+ vfio_pci 在开机模块表里（早于 amdgpu 执行）
 #      两者配合，在 initramfs 阶段就完成抢占；之后 amdgpu 根本没机会绑定。
 #   2. **`blacklist amdgpu` 是装饰**（本工具不再管理它，也不再把它当冲突报）：
-#        - 拦不住显式 modprobe：`modprobe amdgpu` 照样把依赖链解析出来（复位钩子就靠这个）
+#        - 拦不住显式 modprobe：`modprobe amdgpu` 照样把依赖链解析出来（核显复位就靠这个）
 #        - 它对 alias 自动加载确实有效，但那一层本来就是多余的——设备早被 vfio-pci 占住了
 #      所以"黑名单在不在"与"能不能直通"无关；留着无害，只在 detail 里如实报出。
 #   3. **modprobe.d 会被打进 initramfs**：改完必须 update-initramfs，否则早期启动仍按旧配置走。
