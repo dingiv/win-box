@@ -64,6 +64,12 @@ show_status() {
   while IFS='=' read -r k v; do
     printf '  %-20s %s\n' "$k" "$v"
   done < <(wb_host_gpu_detail)
+  # 常见误解：看到 amdgpu 被加载就以为它接管了核显 —— 其实"加载"与"绑定"是两件事
+  if [[ $(grep -q '^amdgpu' /proc/modules 2>/dev/null && echo yes || echo no) == yes ]] \
+     && [[ $(wb_pci_driver "$(wb_conf_get_default WB_GPU_BDF '')" 2>/dev/null || echo '') != amdgpu ]]; then
+    wb_log '  （amdgpu 模块已加载但未绑定任何设备 —— 正常：udev 按 modalias 自动加载它，'
+    wb_log '    而设备已被 vfio-pci 在开机早期认领；判据是 driver 与引用数，不是"模块在不在"）'
+  fi
   wb_log ''
   case $mode in
     passthrough) wb_ok '当前：直通姿态（宿主不用核显，客机可以直通）' ;;
