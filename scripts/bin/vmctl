@@ -120,7 +120,8 @@ case $CMD in
     ;;
   snapshot-save)
     NAME=${1:-}
-    [[ -n $NAME ]] || wb_fail 2 vm "需要快照名: winbox vm snapshot-save <名字>" "winbox vm --help"
+    # 名字可省：默认用时间戳（快照名在人读的场合才有意义，强行要求反而添乱）
+    [[ -n $NAME ]] || NAME="snap-$(date +%Y%m%d-%H%M%S)"
     state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
     [[ $state == shutoff ]] || wb_fail 3 vm "先关机（当前 $state）——磁盘快照必须在关机状态拍" "docs/interfaces/02-vmctl.md"
     wb_run "${V[@]}" snapshot-create-as "$VM" "$NAME" --disk-only --atomic --no-metadata \

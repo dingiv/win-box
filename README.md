@@ -87,17 +87,18 @@ win-box/
 ├── scripts/
 │   ├── lib/*.sh             函数库（L3）：可 source、可单独调用，无副作用约定
 │   └── bin/*                长流程封装（L1/L2）：可执行、可中断、支持 --dry-run
-├── src/romtool/             C 工具（仅用于 shell 不适合的二进制/设备操作）
+├── src/romtool/             C 工具（仅用于 shell 不适合的二进制/设备操作；make test 离线自测）
+├── guest/                   Windows 侧脚本（建立 SSH 通道、客机体检）
 ├── config/
 │   ├── win-box.conf.example 唯一配置入口的样板（真实配置被 gitignore）
 │   └── templates/           域 XML 模板与形态片段（VM 定义的真相源）
 ├── docs/
 │   ├── interfaces/          对外契约：命令、函数库 API、C 工具 CLI
 │   ├── calltrees/           端到端链路：复位轮回、Looking Glass 全链、自检取证…
-│   ├── zh/                  中文实录（排障过程、踩坑、证据）
+│   ├── zh/                  中文实录（排障过程、踩坑、证据）+ 索引
+│   ├── en/                  英文概览
 │   └── samples/             脱敏后的配置与证据样本
-├── guest/                   Windows 侧脚本（PowerShell / 批处理）
-├── tests/smoke.sh           不依赖硬件与 root 的基础设施冒烟测试
+├── tests/smoke.sh           不依赖硬件与 root 的冒烟测试（248 条）
 └── third_party/             上游源码（git submodule，钉 commit）
 ```
 
@@ -132,10 +133,12 @@ win-box/
 
 | 想了解 | 看 |
 | --- | --- |
-| 这个项目要解决什么、不做什么 | `REQUIREMENTS.md` |
-| 命令与函数长得什么样 | `docs/interfaces/` |
-| 一条操作链具体怎么走 | `docs/calltrees/` |
-| 为什么这么设计、踩过什么坑 | `docs/zh/` |
+| 这个项目要解决什么、不做什么 | [`REQUIREMENTS.md`](REQUIREMENTS.md) |
+| 数据怎么流、状态怎么变、模块怎么分 | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| 命令与函数长得什么样（契约） | [`docs/interfaces/`](docs/interfaces/) |
+| 一条操作链具体怎么走 | [`docs/calltrees/`](docs/calltrees/) |
+| 为什么这么设计、踩过什么坑（实录） | [`docs/zh/`](docs/zh/)（[索引与旧命令对照](docs/zh/README.md)） |
+| 英文概览 | [`docs/en/`](docs/en/) |
 
 ## 已知限制
 

@@ -40,6 +40,16 @@ case ${1:-} in
     bin=$(wb_lg_client_bin)
     [[ -x $bin ]] && "$bin" --help 2>&1 | head -40 | sed 's/^/  /' >&2
     exit 0 ;;
+  --idd-show)
+    wb_guest_ready || wb_fail 3 lg \
+      "没有可用的客机 SSH 通道（配置 WB_GUEST_USER/WB_GUEST_HOST/WB_GUEST_KEY）" \
+      "docs/zh/04-客机SSH直连通道.md"
+    wb_log '== 客机显卡 =='
+    wb_guest_gpu_status
+    wb_log ''
+    wb_log '== 客机 IDD 现状 =='
+    wb_guest_idd_status
+    exit 0 ;;
   --idd-prefs)
     wb_log '== 应用客机 IDD 偏好 =='
     wb_idd_prefs_apply
