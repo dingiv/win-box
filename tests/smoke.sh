@@ -140,7 +140,13 @@ check 'winbox --help' 0 "$WB_ROOT/scripts/bin/winbox" --help
 check 'winbox --version' 0 "$WB_ROOT/scripts/bin/winbox" --version
 check '未知选项 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" --nope
 check '未知命令 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" frobnicate
-check '未实现命令 → 码 1' 1 "$WB_ROOT/scripts/bin/winbox" host-prep
+# 所有命令都已实现：入口表里不该再有"占位"入口（dispatcher 的"尚未实现"分支
+# 仍保留作为防御，但默认情况下不该被触达）
+check '所有命令都已实现（无半成品入口）' 0 bash -c "
+  for c in detect conf adopt status evidence host-prep vm-create gpu-attach \
+           lg-prepare lg-shmem reset-hook lg rom vmctl; do
+    [[ -x '$WB_ROOT/scripts/bin/'\$c ]] || { echo \"缺: \$c\"; exit 1; }
+  done"
 check 'winbox conf key=value 往返' 0 bash -c "
   '$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME=beta
   [[ \$('$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME) == beta ]]"
@@ -552,6 +558,36 @@ check 'romtool 与 sha256sum 对拍' 0 bash -c "
   theirs=\$(sha256sum '$TMP/synth-good.rom' | cut -d' ' -f1)
   [[ \$mine == \$theirs && -n \$mine ]]"
 check 'dump 非 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" rom dump --bdf 0000:00:00.0 "$TMP/x.rom"
+
+printf '\n== 21. host-prep 与 vm-create ==\n'
+# 21.1 host-prep 干跑：只读检查，非 root 也应能跑完（让人先看清"会改什么"再决定 sudo）
+out=$("$WB_ROOT/scripts/bin/winbox" -n host-prep 2>&1); rc=$?
+if [[ $rc == 0 || $rc == 5 ]]; then ok "winbox -n host-prep 正常退出（码 $rc）"; else bad "winbox -n host-prep 异常（码 $rc）"; printf '%s\n' "$out" | sed 's/^/      /'; fi
+has 'host-prep 干跑走到最后一步' "$out" '== 6/6'
+has 'host-prep 检查 initramfs 里的 amdgpu（关键坑）' "$out" 'initramfs 模块表'
+has 'host-prep 检查内核参数' "$out" '内核参数'
+check 'host-prep 真跑需要 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-prep
+
+# 21.2 vm-create 拒绝重名（假 virsh 把"已存在"变成确定条件，离线可测）
+mkdir -p "$TMP/bin2"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$TMP/bin2/virsh"
+chmod +x "$TMP/bin2/virsh"
+check 'vm-create 重名 → 码 2（不覆盖、不删除）' 2 \
+  env PATH="$TMP/bin2:$PATH" WB_CONF_PATH="$TMP/vmc.conf" "$WB_ROOT/scripts/bin/winbox" vm-create --name win11
+
+# 21.3 vm-create 干跑：不改配置、不建磁盘，但会真的渲染并用 libvirt schema 校验
+VMC_CFG="$TMP/vmc.conf"
+cp "$RENDER_CONF" "$VMC_CFG"
+before=$(sha256sum "$VMC_CFG" | cut -c1-16)
+out=$(env WB_CONF_PATH="$VMC_CFG" "$WB_ROOT/scripts/bin/winbox" -n -y vm-create \
+  --name testbox --memory 4096 --vcpus 4 --disk 8 --disk-path "$TMP/tb.qcow2" 2>&1); rc=$?
+if [[ $rc == 0 ]]; then ok 'vm-create 干跑正常退出'; else bad "vm-create 干跑异常（码 $rc）"; printf '%s\n' "$out" | sed 's/^/      /'; fi
+has 'vm-create 干跑会校验渲染结果' "$out" 'domain.rng'
+has 'vm-create 默认初始形态是 inspect（装系统要看得见）' "$out" 'WB_VIDEO_MODE=inspect'
+check 'vm-create 干跑不建磁盘' 0 bash -c "[[ ! -e '$TMP/tb.qcow2' ]]"
+after=$(sha256sum "$VMC_CFG" | cut -c1-16)
+if [[ $before == "$after" ]]; then ok 'vm-create 干跑不改配置'; else bad 'vm-create 干跑改了配置'; fi
+
 
 printf '\n== 20. 仓库卫生（C 产物不入库）==\n'
 check 'C 的二进制与对象文件未被跟踪' 0 bash -c "

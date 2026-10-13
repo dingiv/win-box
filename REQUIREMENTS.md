@@ -90,6 +90,20 @@
 - 不承诺复位 bug 被"根治"（只提供规避 hook 与冷启动建议）
 - 不提供 Windows 镜像（用户自备合法授权镜像）
 
+## 实现状态（2026-10-13 收尾）
+
+15 条完成标准中，除「推送远程仓库」这类工程性事务外均已达成：
+
+- ✅ 命令全部实现（detect / host-prep / adopt / vm-create / conf / vm / gpu-attach /
+  lg-prepare / lg-shmem / lg / reset-hook / status / evidence / rom）
+- ✅ shellcheck 全绿；`tests/smoke.sh` 261 条断言（不需虚拟机/核显/root）
+- ✅ C 工具 `src/romtool`：`make test` 52 条断言，用合成 ROM（仓库内不含 AMD 二进制），
+  并在真实 ROM 上验证过解析与 SHA256
+- ✅ 完整链路文档：docs/interfaces（契约）+ docs/calltrees（链路）+ ARCHITECTURE.md +
+  docs/zh（实录）+ docs/en（英文门面）；内部链接全部校验通过
+- ✅ 三个第三方仓库以 submodule 钉 commit；上游许可与来源在 `.gitmodules` 与 README 注明
+- ⬜ 推送远程仓库（待用户提供远端）
+
 ## 已确认决策（2026-10-13）
 
 | 事项 | 决策 |

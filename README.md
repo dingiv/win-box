@@ -10,11 +10,13 @@
 
 ## 项目状态
 
-**主干完成，剩 `host-prep` / `vm-create` 与文档迁移**。已实现：
+**命令全部实现**（`winbox --help` 里带 ★ 的即是）；剩「推送远程仓库」这类工程性事务。
 
 ```bash
 scripts/bin/winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
+scripts/bin/winbox host-prep     # 宿主准备（依赖 / vfio / initramfs / 内核参数；幂等）
 scripts/bin/winbox adopt         # 接管现有 VM：把身份信息提取到配置
+scripts/bin/winbox vm-create     # 新建 VM（UEFI + TPM2，模板渲染）
 scripts/bin/winbox conf          # 配置的唯一读写入口
 scripts/bin/winbox vm render     # 按模板渲染域 XML（打印，不生效）
 scripts/bin/winbox gpu-attach    # 挂核显：ROM 校验/部署 + 模板重定义
@@ -26,12 +28,9 @@ scripts/bin/winbox status        # 全链路自检（退出码即结论）
 scripts/bin/winbox evidence      # 一键取证包（14 项 + sha256 清单）
 scripts/bin/winbox rom           # ROM 工具（C：info/verify/patch/merge/dump/extract）
 
-bash tests/smoke.sh              # 248 条断言，不需虚拟机/核显/root
+bash tests/smoke.sh              # 261 条断言，不需虚拟机/核显/root
 make -C src/romtool test         # 52 条 C 断言，用合成 ROM，不需硬件
 ```
-
-未实现：`host-prep`、`vm-create`（从零建机那条路）；`docs/zh` 的实录文档尚未迁入。
-`winbox --help` 里 ★ 标记的才是已实现。
 
 ## 前置要求
 
@@ -48,29 +47,31 @@ make -C src/romtool test         # 52 条 C 断言，用合成 ROM，不需硬�
 Looking Glass 的 IDD 安装包。这些用脚本在你自己的机器上提取或从官方渠道获取
 （原因见 `.gitignore` 与 `docs/interfaces/03-romtool.md`）。
 
-## 快速开始（目标流程）
-
-> ⚠ **当前进度**：下表前两步（`host-prep`、`vm-create`）**尚未实现**（契约已定，见
-> `docs/interfaces/`）；已实现的命令用 `scripts/bin/winbox --help` 里的 ★ 标记。
-> 已有虚拟机的路线（`adopt` → `gpu-attach` → `lg-*` → `status`）是完整可跑的。
+## 快速开始
 
 ```bash
 git clone --recurse-submodules <本仓库>
 cd win-box
 
 scripts/bin/winbox detect --write     # 1. 探测硬件与环境，生成 config/win-box.conf
-scripts/bin/winbox adopt              # 2.（已有 VM 时）接管它：提取身份信息到配置
-sudo scripts/bin/winbox host-prep     # 3. 宿主准备 [未实现] 依赖 / vfio / initramfs / 内核参数
-scripts/bin/winbox vm-create          # 4. 建机 [未实现] UEFI + TPM2，然后手工装 Windows
-sudo scripts/bin/winbox gpu-attach    # 5. 把核显挂进去（ROM + 专属 root port + 显示模式）
-sudo scripts/bin/winbox lg-prepare    # 6. KVMFR 模块 + 构建 Looking Glass 客户端
-sudo scripts/bin/winbox lg-shmem      # 7. 共享内存设备 + 权限双闸
-sudo scripts/bin/winbox reset-hook install   # 8. 复位轮回钩子（免每次冷启动宿主）
-scripts/bin/winbox lg                 # 9. 开窗口
+sudo scripts/bin/winbox host-prep     # 2. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能要重启
+#   已有虚拟机的人到这一步就够了：下面 3 换成 adopt
+winbox adopt                          # 3a.（推荐）接管现有 VM：把身份信息提取到配置
+#   或从零新建：
+sudo winbox vm-create                 # 3b. 建机（UEFI + TPM2），然后手工装 Windows
+sudo scripts/bin/winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg   # 4. 挂核显
+sudo scripts/bin/winbox lg-prepare    # 5. KVMFR 模块 + 构建 Looking Glass 客户端
+sudo scripts/bin/winbox lg-shmem      # 6. 共享内存设备 + 权限双闸
+sudo scripts/bin/winbox reset-hook install   # 7. 复位轮回钩子（免每次冷启动宿主）
+scripts/bin/winbox vm start && scripts/bin/winbox lg   # 8. 开机 + 开窗口
 ```
 
-已有虚拟机的人可以直接跳到 `adopt` → `gpu-attach`：`adopt` 会把现有身份（UUID/磁盘/固件/网卡）写进配置，
-之后这台机的域定义就由模板接管。
+先干跑看清会改什么（所有 mutating 命令都支持 `--dry-run`，连模板渲染结果都会校验）：
+
+```bash
+winbox -n host-prep            # 六步只读检查（非 root 也能跑）
+winbox -n vm-create --name test
+```
 
 装完系统后在客机内一次性完成：装 AMD 驱动（离线版）→ 装 Looking Glass IDD
 （`/S /ivshmem`）→ 开 SSH 通道 → 应用 IDD 偏好。细节见 `docs/zh/`。

@@ -314,10 +314,17 @@ wb_xml_require_stopped() {
 
 wb_xml_define() {
   local f=${1:-}
+  if wb_is_dry_run; then
+    wb_log "  [dry-run] virsh -c qemu:///system define $f"
+    return 0
+  fi
   wb_require_file "$f"
   wb_run virsh -c qemu:///system define "$f" >/dev/null \
     || wb_fail 1 xml "virsh define 被拒绝（渲染结果不合法？）: $f" \
       "docs/calltrees/02-create-and-attach.md"
+  # dry-run 时域并未真的被定义出来，回读会必然失败
+  if wb_is_dry_run; then return 0; fi
+  wb_vm_verify_xml
   return 0
 }
 

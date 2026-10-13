@@ -69,20 +69,26 @@ winbox [全局选项] <command> [command 选项]
 
 ### 阶段流程（mutating；标注 sudo 的需 root）
 
-#### `winbox host-prep`
+#### `winbox host-prep [--skip-deps]`
 
-- **输入**：无
-- **输出**：apt 依赖、libvirtd、vfio 模块配置、initramfs 清理（移除 amdgpu）、内核参数、用户组
-- **失败**：码 3 = distro 不在支持列表 / 缺 apt
-- **生命周期**：幂等；执行后**可能需要重启** → 若检测到需要重启，打印提示并以 **码 5** 退出（区别于失败）
-- **依赖**：`lib/sys.sh` `lib/detect.sh`
+- **输入**：`--skip-deps` 跳过 apt 安装（只做 vfio/initramfs/内核参数/用户组）
+- **输出**：六步——依赖 → libvirtd 与默认网络/存储池 → vfio 模块配置（`ids=` + `softdep` + 黑名单）→
+  initramfs 模块表（把 amdgpu 拿掉、把 vfio 四件套补齐）→ 内核参数（IOMMU + 关宿主 framebuffer）→ 用户组
+- **失败**：码 3 = 非 root（除非 `--dry-run`）/ 缺 dpkg·apt-get·update-initramfs / 读不到核显 ID；
+  码 1 = apt·update-initramfs·update-grub 失败；**码 5 = 改动涉及内核参数或 initramfs，必须重启宿主**
+- **sudo**：真跑需 root；**`--dry-run` 不需要 root**（只读检查 + 打印将写入的内容）
+- **生命周期**：幂等——已配好的机器上跑它应报“无需改动”且**不要求重启**
 
-#### `winbox vm-create [--name N] [--memory MB] [--vcpus N] [--disk GB] [--iso PATH]`
+#### `winbox vm-create [--name N] [--memory MB] [--vcpus N] [--disk GB] [--iso PATH] [--disk-path P] [--reuse-disk]`
 
-- **输入**：规格参数（默认值来自配置）
-- **输出**：一条 libvirt domain（UEFI + SecureBoot + TPM2 + q35）
-- **失败**：码 3 = 缺 ovmf/swtpm/virt-install；码 2 = VM 名已存在
-- **生命周期**：**不幂等**（重名拒绝而非覆盖）；安装系统本身是人工步骤（打印操作指引）
+- **输入**：规格参数（默认值来自配置）；`--disk-path` 指定磁盘位置（默认 `/var/lib/libvirt/images/<名字>.qcow2`）
+- **输出**：生成身份（UUID/MAC 写入配置）→ 创建 qcow2 磁盘 → 从模板渲染并 `virsh define`
+  （初始形态固定为 `inspect`：QXL + SPICE，装系统时**看得见**；不挂核显、不挂共享内存）
+- **失败**：码 2 = VM 名已存在（**不幂等，绝不覆盖或删除**）/ 磁盘已存在（除非 `--reuse-disk`）；
+  码 3 = 缺 virsh·qemu-img / OVMF 文件不存在 / ISO 不存在；码 5 = 配置里已有别的 VM 而用户在确认时拒绝
+- **生命周期**：**终点是码 5**——装 Windows 本身是人工步骤，命令不假装成功
+- **引导顺序**：模板里磁盘 `order=1`、光驱 `order=2`。空盘时 UEFI 自动落到光驱装系统，
+  装完盘能直接启动——**不需要想起来去 eject**（旧流程的经典坑）
 
 #### `winbox gpu-attach [--rom FILE] [--audio-rom FILE] [--mode test|inspect|lg|both] [--detach]`
 

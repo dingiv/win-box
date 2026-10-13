@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox host-prep（scripts/bin/host-prep）
+#
+# 契约：docs/interfaces/01-winbox-cli.md ／ 链路：docs/calltrees/01-detect-and-host-prep.md
+#
+# 宿主机一次性准备。六步，全部幂等——**已经配好的机器上跑它应该报"无需改动"并不要求重启**。
+#
+# 三个关键点（都是踩出来的）：
+#   1. blacklist 只挡 alias 自动加载；/etc/initramfs-tools/modules 里的条目是**显式 modprobe**，
+#      必须从那里删掉，否则 initramfs 里照样加载 amdgpu（实测 initramfs 因此多 34MB）。
+#   2. vfio 的 softdep 必须写在 modprobe.d：让 vfio-pci 在 amdgpu/snd_hda_intel **之前**
+#      拿到设备，否则驱动抢占后直通设备拿不到。
+#   3. 内核参数（IOMMU + 关掉宿主 framebuffer）写进 GRUB 后**必须重启**才生效 ——
+#      所以本命令在发生这类改动时以退出码 5 收尾（"需要人工介入"），而不是假装成功。
+#
+# 用法：
+#   sudo winbox host-prep                 # 全做（幂等）
+#   sudo winbox host-prep --dry-run       # 看会改什么（全局选项）
+#   sudo winbox host-prep --skip-deps     # 只做 vfio/initramfs/内核参数
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/detect.sh
+source "$WB_LIB_DIR/detect.sh"
+
+SKIP_DEPS=0
+while (( $# )); do
+  case $1 in
+    --skip-deps) SKIP_DEPS=1; shift ;;
+    -h | --help)
+      sed -n '4,19p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 host-prep "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+# --dry-run 不需要 root：它只做只读检查 + 打印将写入的内容，
+# 让任何人都能先看清"这条命令会改什么"再决定是否 sudo
+if ! wb_is_dry_run; then
+  wb_require_root
+fi
+wb_require_cmd dpkg apt-get update-initramfs
+wb_conf_load
+
+PACKAGES=(
+  qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients
+  virtinst ovmf swtpm swtpm-tools
+  virt-manager virt-viewer
+)
+REBOOT_REQUIRED=0
+CHANGED=0
+
+# ── 1/6 依赖 ──────────────────────────────────────────────────────────────
+wb_step '1/6' '安装虚拟化依赖'
+if (( SKIP_DEPS )); then
+  wb_log '  （按参数跳过）'
+else
+  missing=()
+  for p in "${PACKAGES[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  if (( ${#missing[@]} == 0 )); then
+    wb_ok "依赖齐备（${#PACKAGES[@]} 个包）"
+  else
+    wb_log "  缺少: ${missing[*]}"
+    wb_run apt-get update -qq || wb_fail 1 host-prep "apt-get update 失败" "docs/zh/07-踩坑大全.md"
+    wb_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
+      || wb_fail 1 host-prep "apt-get install 失败（看上面报错）" "docs/zh/07-踩坑大全.md"
+    CHANGED=1
+    if wb_is_dry_run; then wb_log "  [dry-run] 将安装 ${#missing[@]} 个包"; else wb_ok "已安装 ${#missing[@]} 个包"; fi
+  fi
+fi
+
+# ── 2/6 libvirtd 与默认网络/存储池 ────────────────────────────────────────
+wb_step '2/6' 'libvirtd 服务与默认网络/存储池'
+if systemctl is-enabled --quiet libvirtd 2>/dev/null && systemctl is-active --quiet libvirtd 2>/dev/null; then
+  wb_ok 'libvirtd 已启用并运行'
+else
+  wb_run systemctl enable --now libvirtd || wb_fail 1 host-prep "libvirtd 启动失败" "docs/zh/07-踩坑大全.md"
+  CHANGED=1
+  wb_ok 'libvirtd 已启用并启动'
+fi
+if wb_have_cmd virsh; then
+  if virsh -c qemu:///system net-info default >/dev/null 2>&1; then
+    if [[ $(virsh -c qemu:///system net-info default 2>/dev/null | awk -F: '/^Active/{gsub(/ /,"",$2);print $2}') == yes ]]; then
+      wb_ok '默认网络 default 已激活'
+    else
+      wb_run virsh -c qemu:///system net-start default >/dev/null 2>&1 || true
+      wb_run virsh -c qemu:///system net-autostart default >/dev/null 2>&1 || true
+      wb_ok '默认网络 default 已启动'
+      CHANGED=1
+    fi
+  else
+    wb_warn '找不到默认网络 default（libvirt 未初始化？）'
+  fi
+  if ! virsh -c qemu:///system pool-info default >/dev/null 2>&1; then
+    wb_warn '找不到默认存储池 default（vm-create 会直接指定磁盘路径，不影响）'
+  fi
+fi
+
+# ── 3/6 vfio 模块配置 ────────────────────────────────────────────────────
+wb_step '3/6' 'vfio 模块配置（ids= + softdep + 黑名单）'
+GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
+if [[ -z $GPU_BDF ]]; then
+  wb_warn '未配置 WB_GPU_BDF —— 跳过 vfio 配置（先跑 winbox detect --write）'
+else
+  # 需要 vendor:device：优先用配置，缺了就从 sysfs 读
+  GPU_ID=$(wb_conf_get_default WB_GPU_ID '')
+  AUDIO_ID=$(wb_conf_get_default WB_AUDIO_ID '')
+  dev_id_of() {
+    local bdf=${1:-} p
+    [[ -n $bdf ]] || return 0
+    p="/sys/bus/pci/devices/$bdf"
+    [[ -r $p/vendor && -r $p/device ]] || return 0
+    printf '%s:%s\n' "$(sed 's/^0x//' "$p/vendor")" "$(sed 's/^0x//' "$p/device")"
+  }
+  [[ -n $GPU_ID ]] || GPU_ID=$(dev_id_of "$GPU_BDF")
+  AUDIO_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
+  [[ -n $AUDIO_ID ]] || AUDIO_ID=$(dev_id_of "$AUDIO_BDF")
+  [[ -n $GPU_ID ]] || wb_fail 3 host-prep "读不到核显的 vendor:device：$GPU_BDF" \
+    "docs/interfaces/01-winbox-cli.md"
+
+  ids=$GPU_ID
+  [[ -n $AUDIO_ID ]] && ids="$GPU_ID,$AUDIO_ID"
+
+  want_vfio="options vfio-pci ids=$ids
+softdep amdgpu pre: vfio-pci
+softdep snd_hda_intel pre: vfio-pci"
+
+  # initramfs 里加载了 vfio 的机器才需要考虑顺序；第 4 步会把 vfio 四件套补齐
+  if [[ -f /etc/modprobe.d/vfio.conf ]] && [[ $(cat /etc/modprobe.d/vfio.conf) == "$want_vfio" ]]; then
+    wb_ok "vfio.conf 已就绪（ids=$ids）"
+  else
+    wb_write /etc/modprobe.d/vfio.conf "$want_vfio"
+    wb_ok "已写入 /etc/modprobe.d/vfio.conf（ids=$ids）"
+    REBOOT_REQUIRED=1
+    CHANGED=1
+  fi
+
+  # 黑名单 amdgpu：全目录检查，已经黑过就不重复写（本机就在 blacklist.conf 里）
+  if grep -rqs '^\s*blacklist\s\+amdgpu\b' /etc/modprobe.d/; then
+    wb_ok 'amdgpu 已在黑名单（任意 modprobe.d 文件）'
+  else
+    printf '\n# win-box：核显交给 vfio-pci，宿主不需要 amdgpu\nblacklist amdgpu\n' >> /etc/modprobe.d/vfio.conf
+    wb_ok '已把 amdgpu 加入黑名单'
+    REBOOT_REQUIRED=1
+    CHANGED=1
+  fi
+
+  # initramfs 里已经有 vfio_pci 时，modules-load 是冗余的；两种情况都只是"下次启动自然生效"，
+  # 因此不设 REBOOT_REQUIRED（否则一台本来就配好的机器会被误报成"需要重启"）
+  if [[ -f /etc/modules-load.d/vfio-pci.conf ]]; then
+    wb_ok 'vfio-pci 已配置开机加载'
+  elif grep -qE '^\s*vfio_pci\s*$' /etc/initramfs-tools/modules 2>/dev/null; then
+    wb_ok 'vfio_pci 已在 initramfs 模块表里（无需额外的 modules-load 条目）'
+  else
+    wb_write /etc/modules-load.d/vfio-pci.conf 'vfio-pci'
+    wb_ok '已配置 vfio-pci 开机加载'
+    CHANGED=1
+  fi
+fi
+
+# ── 4/6 initramfs：把 amdgpu 拿掉，把 vfio 补齐 ───────────────────────────
+wb_step '4/6' 'initramfs 模块表（关键：blacklist 管不住显式 modprobe）'
+MODFILE=/etc/initramfs-tools/modules
+[[ -f $MODFILE ]] || wb_run touch "$MODFILE"
+initramfs_changed=0
+
+if grep -qE '^\s*amdgpu\s*$' "$MODFILE" 2>/dev/null; then
+  tmp=$(mktemp)
+  awk '{ if ($0 ~ /^[ \t]*amdgpu[ \t]*$/) print "# amdgpu（win-box：已从 initramfs 移除，核显交给 vfio-pci）"; else print }' \
+    "$MODFILE" > "$tmp"
+  if wb_is_dry_run; then
+    wb_log "  [dry-run] 从 $MODFILE 注释掉 amdgpu"
+  else
+    cp -a "$MODFILE" "${MODFILE}.bak.$(date +%Y%m%d%H%M%S)"
+    install -m 644 "$tmp" "$MODFILE"
+    wb_ok '已从 initramfs 模块表移除 amdgpu'
+  fi
+  rm -f "$tmp"
+  initramfs_changed=1
+else
+  wb_ok 'initramfs 模块表里没有 amdgpu（正确）'
+fi
+
+for m in vfio vfio_iommu_type1 vfio_pci; do
+  if grep -qE "^\s*$m\s*$" "$MODFILE" 2>/dev/null; then
+    :
+  else
+    printf '%s\n' "$m" >> "$MODFILE"
+    wb_ok "已把 $m 加入 initramfs 模块表"
+    initramfs_changed=1
+  fi
+done
+
+if (( initramfs_changed )); then
+  wb_run update-initramfs -u -k all || wb_fail 1 host-prep "update-initramfs 失败" "docs/zh/07-踩坑大全.md"
+  REBOOT_REQUIRED=1
+  CHANGED=1
+  wb_ok 'initramfs 已重建'
+else
+  wb_ok 'initramfs 模块表无需改动'
+fi
+
+# ── 5/6 内核参数 ─────────────────────────────────────────────────────────
+wb_step '5/6' '内核参数（IOMMU + 宿主不占核显 framebuffer）'
+GRUB=/etc/default/grub
+want_params=(amd_iommu=on iommu=pt initcall_blacklist=sysfb_init video=efifb:off video=vesafb:off)
+grub_changed=0
+cur=$(awk -F'"' '/^GRUB_CMDLINE_LINUX_DEFAULT=/{print $2}' "$GRUB" 2>/dev/null || true)
+if [[ -z $cur && ! -f $GRUB ]]; then
+  wb_warn "找不到 $GRUB（非 GRUB 引导？）——跳过内核参数，按 docs/zh/06 手工加：${want_params[*]}"
+else
+  new=$cur
+  added=()
+  for p in "${want_params[@]}"; do
+    case " $new " in *" $p "*) ;; *) new="$new $p"; added+=("$p") ;; esac
+  done
+  if (( ${#added[@]} == 0 )); then
+    wb_ok "内核参数已齐备（$cur）"
+  else
+    new=${new# }
+    tmp=$(mktemp)
+    awk -v v="$new" '/^GRUB_CMDLINE_LINUX_DEFAULT=/{ print "GRUB_CMDLINE_LINUX_DEFAULT=\"" v "\""; next } { print }' \
+      "$GRUB" > "$tmp"
+    if wb_is_dry_run; then
+      wb_log "  [dry-run] $GRUB: GRUB_CMDLINE_LINUX_DEFAULT=\"$new\""
+    else
+      cp -a "$GRUB" "${GRUB}.bak.$(date +%Y%m%d%H%M%S)"
+      install -m 644 "$tmp" "$GRUB"
+    fi
+    rm -f "$tmp"
+    wb_ok "已加入: ${added[*]}"
+    grub_changed=1
+  fi
+fi
+if (( grub_changed )); then
+  wb_run update-grub || wb_fail 1 host-prep "update-grub 失败" "docs/zh/07-踩坑大全.md"
+  REBOOT_REQUIRED=1
+  CHANGED=1
+  wb_ok 'GRUB 已更新'
+fi
+
+# ── 6/6 用户组 ───────────────────────────────────────────────────────────
+wb_step '6/6' '把调用者加入 kvm / libvirt 组'
+target=${SUDO_USER:-}
+if [[ -z $target || $target == root ]]; then
+  wb_warn "无法判断调用者（SUDO_USER 为空）——请手工把常用账号加入 kvm、libvirt 组"
+else
+  need=()
+  for g in kvm libvirt; do
+    getent group "$g" >/dev/null 2>&1 || { wb_warn "组 $g 不存在（libvirt 装了吗？）"; continue; }
+    id -nG "$target" | tr ' ' '\n' | grep -qx "$g" || need+=("$g")
+  done
+  if (( ${#need[@]} == 0 )); then
+    wb_ok "$target 已在 kvm、libvirt 组"
+  else
+    for g in "${need[@]}"; do wb_run usermod -aG "$g" "$target"; done
+    wb_ok "已把 $target 加入: ${need[*]}（重新登录后生效）"
+    CHANGED=1
+  fi
+fi
+
+# ── 收尾 ─────────────────────────────────────────────────────────────────
+echo >&2
+if (( REBOOT_REQUIRED )); then
+  wb_warn '改动涉及内核参数或 initramfs —— 必须重启宿主才生效'
+  wb_hint '重启后自检：lsmod | grep amdgpu（应为空） 与 winbox detect'
+  if wb_is_dry_run; then
+    wb_log ''
+    wb_log '（--dry-run：以上改动均未落盘；真跑的话这一步会要求你重启宿主）'
+    exit 0
+  fi
+  wb_fail 5 host-prep '需要重启宿主' "docs/calltrees/01-detect-and-host-prep.md"
+fi
+if (( CHANGED )); then
+  wb_ok 'host-prep 完成（有改动，但无需重启）'
+else
+  wb_ok 'host-prep 完成：这台机器已经配好了，无需改动'
+fi
+wb_hint '下一步: winbox adopt（接管现有 VM）或 winbox vm-create（新建）'

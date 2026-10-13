@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox vm-create（scripts/bin/vm-create）
+#
+# 契约：docs/interfaces/01-winbox-cli.md ／ 链路：docs/calltrees/02-create-and-attach.md
+#
+# 建一条 libvirt 域（q35 + OVMF + TPM2 + SATA + e1000e），**沿用同一套模板渲染**——
+# 与 gpu-attach/lg-shmem 是同一个引擎，所以建出来的机和后来改出来的机不会有形态漂移。
+#
+# 三个刻意的设计：
+#   * **不幂等**：重名直接拒绝（码 2），绝不"删除重建"——磁盘里可能是别人装了两小时系统
+#   * 初始形态是 `inspect`（QXL + SPICE）：装 Windows 需要**看得见**的窗口
+#   * 磁盘/光驱的引导顺序是「盘先、光驱后」：空盘时 UEFI 自动落到光驱装系统，
+#     装完之后盘能直接启动，**不需要想起来去 eject**（旧流程的经典坑）
+#
+# 装 Windows 本身是人工步骤 —— 因此本命令以退出码 5 收尾（"需要人工介入"），不是成功。
+#
+# 用法：
+#   sudo winbox vm-create                          # 默认：名字来自配置，16G/8vCPU/128G 盘
+#   sudo winbox vm-create --name win11 --disk 200 --iso /path/win11.iso
+#   winbox -n vm-create --name dry-run             # 先看会做什么（--dry-run）
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+
+wb_conf_load
+
+NAME='' MEMORY='' VCPUS='' DISK_GB='' ISO='' DISK_PATH='' REUSE=0
+while (( $# )); do
+  case $1 in
+    --name)      [[ -n ${2:-} ]] || wb_fail 2 vm-create "--name 需要值" "winbox --help"; NAME=$2; shift 2 ;;
+    --memory)    [[ -n ${2:-} ]] || wb_fail 2 vm-create "--memory 需要 MB 数" "winbox --help"; MEMORY=$2; shift 2 ;;
+    --vcpus)     [[ -n ${2:-} ]] || wb_fail 2 vm-create "--vcpus 需要数量" "winbox --help"; VCPUS=$2; shift 2 ;;
+    --disk)      [[ -n ${2:-} ]] || wb_fail 2 vm-create "--disk 需要 GB 数" "winbox --help"; DISK_GB=$2; shift 2 ;;
+    --iso)       [[ -n ${2:-} ]] || wb_fail 2 vm-create "--iso 需要路径" "winbox --help"; ISO=$2; shift 2 ;;
+    --disk-path) [[ -n ${2:-} ]] || wb_fail 2 vm-create "--disk-path 需要路径" "winbox --help"; DISK_PATH=$2; shift 2 ;;
+    --reuse-disk) REUSE=1; shift ;;
+    -h | --help)
+      sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 vm-create "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+# ── 1/6 前置检查 ──────────────────────────────────────────────────────────
+wb_step '1/6' '前置检查'
+wb_require_cmd virsh qemu-img
+wb_have_cmd uuidgen || true
+[[ $EUID -eq 0 ]] || wb_warn '非 root：磁盘默认建在 /var/lib/libvirt/images（需要 root）——按需用 --disk-path 指到可写目录'
+
+NAME=${NAME:-$(wb_conf_get_default WB_VM_NAME win11)}
+MEMORY=${MEMORY:-$(wb_conf_get_default WB_VM_MEMORY_MB 16384)}
+VCPUS=${VCPUS:-$(wb_conf_get_default WB_VM_VCPUS 8)}
+DISK_GB=${DISK_GB:-128}
+ISO=${ISO:-$(wb_conf_get_default WB_VM_ISO '')}
+OVMF_CODE=$(wb_conf_get_default WB_OVMF_CODE /usr/share/OVMF/OVMF_CODE_4M.fd)
+OVMF_VARS=$(wb_conf_get_default WB_OVMF_VARS /usr/share/OVMF/OVMF_VARS_4M.fd)
+MACHINE=$(wb_conf_get_default WB_MACHINE q35)
+
+[[ $NAME =~ ^[A-Za-z0-9._-]+$ ]] || wb_fail 2 vm-create "VM 名只能含字母数字 . _ -（libvirt 限制）: $NAME" "winbox --help"
+
+if virsh -c qemu:///system dominfo "$NAME" >/dev/null 2>&1; then
+  wb_fail 2 vm-create "虚拟机已存在: $NAME（本命令不幂等，不会覆盖或删除）" \
+    "docs/interfaces/01-winbox-cli.md"
+fi
+wb_require_file "$OVMF_CODE" "$OVMF_VARS"
+[[ -n $ISO && -f $ISO ]] || { [[ -n $ISO ]] && wb_fail 3 vm-create "ISO 不存在: $ISO" "docs/zh/06-最终配置清单与复现步骤.md"; }
+wb_ok "名字=$NAME 内存=${MEMORY}MB vCPU=$VCPUS 机器类型=$MACHINE"
+[[ -n $ISO ]] && wb_ok "安装镜像=$ISO" || wb_warn '未指定安装镜像（--iso 或配置 WB_VM_ISO）——之后可加'
+
+# 覆盖别人配置的风险：配置里已有别的 VM 就要求确认
+prev=$(wb_conf_get_default WB_VM_NAME '')
+if [[ -n $prev && $prev != "$NAME" ]]; then
+  wb_warn "配置当前描述的是 VM「$prev」；建立「$NAME」会覆盖该配置（UUID/磁盘等）"
+  wb_confirm "继续?" || wb_fail 5 vm-create "用户取消（配置会被覆盖）" "docs/interfaces/01-winbox-cli.md"
+fi
+
+# ── 2/6 生成身份 ──────────────────────────────────────────────────────────
+wb_step '2/6' '生成身份（UUID / MAC）并落进配置'
+if wb_have_cmd uuidgen; then
+  UUID=$(uuidgen | tr 'A-Z' 'a-z')
+else
+  UUID=$(cat /proc/sys/kernel/random/uuid)
+fi
+# 52:54:00 是 QEMU 的 OUI；固定下来以后客机不会当新网卡
+MAC=$(printf '52:54:00:%02x:%02x:%02x' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+DISK_PATH=${DISK_PATH:-"/var/lib/libvirt/images/$NAME.qcow2"}
+NVRAM="/var/lib/libvirt/qemu/nvram/${NAME}_VARS.fd"
+
+wb_conf_set WB_VM_NAME "$NAME"
+wb_conf_set WB_VM_UUID "$UUID"
+wb_conf_set WB_VM_MAC "$MAC"
+wb_conf_set WB_VM_MEMORY_MB "$MEMORY"
+wb_conf_set WB_VM_VCPUS "$VCPUS"
+wb_conf_set WB_VM_DISK "$DISK_PATH"
+wb_conf_set WB_VM_NVRAM "$NVRAM"
+wb_conf_set WB_VM_ISO "$ISO"
+wb_conf_set WB_MACHINE "$MACHINE"
+wb_conf_set WB_VM_SECUREBOOT "$(wb_conf_get_default WB_VM_SECUREBOOT 0)"
+wb_log "  UUID=$UUID"
+wb_log "  MAC=$MAC"
+wb_log "  磁盘=$DISK_PATH"
+
+# ── 3/6 磁盘 ─────────────────────────────────────────────────────────────
+wb_step '3/6' "创建磁盘（${DISK_GB}G qcow2）"
+if [[ -e $DISK_PATH ]]; then
+  if (( REUSE )); then
+    wb_warn "磁盘已存在，按 --reuse-disk 复用: $DISK_PATH"
+  else
+    wb_fail 2 vm-create "磁盘已存在: $DISK_PATH（要复用它加 --reuse-disk；要重建请先自己删）" \
+      "docs/interfaces/01-winbox-cli.md"
+  fi
+else
+  wb_run mkdir -p -- "$(dirname -- "$DISK_PATH")"
+  wb_run qemu-img create -f qcow2 "$DISK_PATH" "${DISK_GB}G" \
+    || wb_fail 1 vm-create "qemu-img create 失败（目录可写？权限？）" "docs/zh/07-踩坑大全.md"
+  if wb_is_dry_run; then wb_log '  [dry-run] 磁盘未真正创建'; else wb_ok "已创建 $DISK_PATH"; fi
+fi
+
+# ── 4/6 渲染并定义 ───────────────────────────────────────────────────────
+wb_step '4/6' '渲染模板并 virsh define'
+# 刚建机时：带虚拟显卡（SPICE 能看见），不挂核显、不挂共享内存
+wb_conf_set WB_VIDEO_MODE inspect
+wb_conf_set WB_GPU_ATTACHED 0
+wb_conf_set WB_SHMEM_ENABLED 0
+
+wb_xml_vars_init
+wb_xml_prepare_fragments
+tmpl=$(wb_xml_template_path)
+render="$WB_ROOT/logs/vm-create-$NAME.xml"
+if wb_is_dry_run; then
+  # dry-run 也要真的渲染一份出来：这样"会生成什么 XML、它合不合法"都能当场看到，
+  # 但只落在临时文件里，仓库与 /var/lib 都不留痕迹
+  render=$(mktemp --suffix=.xml)
+  trap 'rm -f -- "$render"' EXIT
+  wb_xml_render "$tmpl" > "$render" || wb_fail 3 vm-create "模板渲染失败" "docs/interfaces/04-lib-api.md"
+  wb_log "  [dry-run] 已渲染到临时文件 $render"
+else
+  wb_xml_render_file "$tmpl" "$render"
+fi
+wb_xml_define "$render"
+if wb_is_dry_run; then wb_log "  [dry-run] 未真正定义虚拟机 $NAME"; else wb_ok "已定义虚拟机 $NAME"; fi
+
+# ── 5/6 自检 ─────────────────────────────────────────────────────────────
+wb_step '5/6' '自检'
+if wb_is_dry_run; then
+  wb_log '  （--dry-run：跳过回读自检——域并未真的被定义）'
+else
+  wb_xml_vars_init
+  wb_vm_verify_xml || true
+fi
+if wb_have_cmd xmllint; then
+  if xmllint --noout --relaxng /usr/share/libvirt/schemas/domain.rng "$render" >/dev/null 2>&1; then
+    wb_ok '定义符合 libvirt 的 domain.rng schema'
+  else
+    wb_warn '渲染结果未通过 domain.rng 校验（libvirt 自己接受了它，但值得看一眼）'
+  fi
+fi
+
+# ── 6/6 下一步 ───────────────────────────────────────────────────────────
+echo >&2
+wb_log "== 下一步 =="
+wb_hint "1. 启动:      winbox vm start"
+wb_hint "2. 打开控制台: winbox vm console（或 viewer）—— 初始是 QXL+SPICE，装系统时看得见"
+wb_hint '3. 客机内：装 Windows（SATA + e1000e 免驱）→ 装 AMD 离线驱动 → 装 Looking Glass IDD'
+wb_hint '4. 装完回到宿主：winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg'
+wb_hint "   然后 sudo winbox lg-shmem && sudo winbox reset-hook install"
+if wb_is_dry_run; then
+  wb_log ''
+  wb_log '（--dry-run：以上步骤均未真正执行）'
+  exit 0
+fi
+wb_fail 5 vm-create '需要人工在客机内安装 Windows' "docs/zh/09-从零一口气配置-精简版.md"
