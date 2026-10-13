@@ -44,19 +44,25 @@ romtool verify()
 
 **用途**：被 `winbox gpu-attach` 在部署 ROM 前调用（不合格就拒绝挂载，避免"改完 XML 才发现 ROM 是坏的"）。
 
-## 6.3 `romtool patch --vendor HHHH --device HHHH [--class HHHH] IN OUT`
+## 6.3 `romtool patch --vendor HHHH --device HHHH [--class HHHHHH] [--fix-checksum] [--dry-run] IN OUT`
 
 ```
 romtool patch()
     公共前置（IN）
-    verify(IN) 失败 → 警告但继续（允许修一个坏 ROM）
-    定位匹配的 PCIR（多处匹配时全部列出并让用户确认；仅一处则直接改）
-    改 vendor/device（可选 class）
-    重算该镜像校验和 + 更新长度字段（若长度需变）
+    verify(IN) 有结构问题 → 警告但继续（允许修一个坏 ROM）
+    逐映像比对 PCIR 里的 ID，不一致就改（打印每个改动点）
+    校验和策略（实测决定，不是 spec 直觉）：
+        原映像合格（和为 0）→ 改完重算回合格
+        原映像就不合格（GOP 常见）→ 保持原样
+        --fix-checksum → 不论原状，全部重算成合格
     写 OUT：temp + rename          ★ 原子性；IN == OUT 时也安全
-    打印改动前后对照表（含新指纹）
-    终止(码 0 / 1 / 2)
+    打印改动前后对照
+    --dry-run → 只打印不落盘
+    终止(码 0 / 1 / 2 / 3 / 5)
 ```
+
+**为何默认不修校验和**：社区的 GOP 盖章流程只改 ID、不动校验和，产物是验证过能用的；
+"顺手修好"会得到与验证过的镜像逐字节不同的文件。这条写进了 03-romtool.md 的契约。
 
 **恢复的历史能力**：原 `patch-rom-ids.py`（给提取的 GOP ROM 盖上本机核显 ID）的唯一用途。
 
@@ -64,16 +70,15 @@ romtool patch()
 
 ```
 romtool merge()
-    verify(A) 必须 OK；B 提供时必须 OK               → 不满足则码 1
-    if A 已有 last_image 置位:
-        清除该位（后面要追加镜像）
-    追加 B 的内容（按 512 对齐）
-    更新 A 的头长度字段与 indicator（最后一枚置 last_image）
-    重算校验和
-    写 OUT（temp+rename）
-    print 结果结构报告（等同 info）
-    ★ 不做任何"发明"式改写：不合成结构、不猜字段
-    终止(码 0 / 1 / 2)
+    要求 A（以及 B）能解析，且 A 的各映像长度合计 == A 文件大小
+    拷贝 A，再追加 B
+    若给了 B：清掉 A 最后一个映像的 “最后映像” 标志（并按其原来的合规状态决定是否重算校验和）
+    头部 size 字节（0x02）× 512 → 合并后总大小
+        ★ 这个字节属于**第一个映像**，改完需要重算第一个映像的校验和（踩过的坑）
+        超过 255*512 则保留原值并警告
+    重解析合并结果：不合法、或最后映像标志未置位 → 拒绝写出
+    打印结构报告（等同 info）
+    终止(码 0 / 1 / 2 / 3 / 5)
 ```
 
 **边界声明**：本命令解决"核显在 UEFI 下需要 GOP、而提取到的 ROM 只有 legacy 部分"这类**机械拼装**问题；它不解决签名、不解决 ID 语义——那属于 `patch`。

@@ -533,6 +533,32 @@ check 'evidence 产出关键文件' 0 bash -c "
 check 'evidence 不含私钥内容' 0 bash -c "
   ! grep -rq 'PRIVATE KEY' '$EV' 2>/dev/null"
 
+printf '\n== 19. C 工具 romtool ==\n'
+ROMDIR="$WB_ROOT/src/romtool"
+check 'romtool 离线测试套件（make test，用合成 ROM）' 0 make -C "$ROMDIR" test
+check 'winbox rom build 幂等' 0 "$WB_ROOT/scripts/bin/winbox" rom build
+"$ROMDIR/tests/mkrom" legacy-valid "$TMP/synth-good.rom" >/dev/null 2>&1
+"$ROMDIR/tests/mkrom" legacy-badcsum "$TMP/synth-bad.rom" >/dev/null 2>&1
+
+check 'winbox rom info（合成 ROM）' 0 "$WB_ROOT/scripts/bin/winbox" rom info "$TMP/synth-good.rom"
+out=$("$WB_ROOT/scripts/bin/winbox" rom info "$TMP/synth-good.rom" 2>&1)
+has 'rom info 输出 PCIR 的 ID' "$out" '1002:13c0'
+has 'rom info 输出 SHA256' "$out" 'SHA256'
+check 'winbox rom verify（合成合格 ROM）' 0 "$WB_ROOT/scripts/bin/winbox" rom verify "$TMP/synth-good.rom"
+check 'winbox rom verify 默认宽容校验和' 0 "$WB_ROOT/scripts/bin/winbox" rom verify "$TMP/synth-bad.rom"
+check 'winbox rom verify --strict 则失败' 1 "$WB_ROOT/scripts/bin/winbox" rom verify --strict "$TMP/synth-bad.rom"
+check 'romtool 与 sha256sum 对拍' 0 bash -c "
+  mine=\$(WB_ROOT='$WB_ROOT' '$WB_ROOT/scripts/bin/winbox' rom info '$TMP/synth-good.rom' --json | sed -n 's/.*\"sha256\": \"\\([0-9a-f]*\\)\".*/\\1/p')
+  theirs=\$(sha256sum '$TMP/synth-good.rom' | cut -d' ' -f1)
+  [[ \$mine == \$theirs && -n \$mine ]]"
+check 'dump 非 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" rom dump --bdf 0000:00:00.0 "$TMP/x.rom"
+
+printf '\n== 20. 仓库卫生（C 产物不入库）==\n'
+check 'C 的二进制与对象文件未被跟踪' 0 bash -c "
+  cd '$WB_ROOT' && ! git ls-files | grep -qE 'romtool$|mkrom$|[.]o$'"
+check '测试临时目录未被跟踪' 0 bash -c "
+  cd '$WB_ROOT' && ! git ls-files | grep -q 'src/romtool/tests/tmp/'"
+
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

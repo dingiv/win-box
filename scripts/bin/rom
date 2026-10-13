@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox rom（scripts/bin/rom）
+#
+# 契约：docs/interfaces/03-romtool.md
+#
+# romtool 的薄包装，只做三件事：
+#   1. 按需构建（用户不该先读 Makefile 才知道怎么用）
+#   2. 路径解析：给裸文件名时按 WB_VBIOS_DIR 里的文件解释
+#   3. 前置检查：dump 需要 root（写 /sys 的 rom 属性），提前说清楚
+# 其余参数一律原样透传给 romtool —— 包装层不重新实现任何 ROM 逻辑。
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+
+wb_conf_load
+TOOL_DIR="$WB_ROOT/src/romtool"
+BIN="$TOOL_DIR/romtool"
+
+ensure_built() {
+  [[ -x $BIN ]] && return 0
+  wb_have_cmd make || wb_fail 3 rom \
+    "romtool 尚未构建，且系统没有 make（sudo apt install build-essential）" \
+    "docs/interfaces/03-romtool.md"
+  wb_log '  构建 romtool（首次使用）…'
+  make -C "$TOOL_DIR" >/dev/null 2>&1 \
+    || wb_fail 1 rom "romtool 构建失败（手动跑 make -C src/romtool 看报错）" \
+      "docs/interfaces/03-romtool.md"
+  wb_ok "已构建: $BIN"
+}
+
+# 裸文件名 → WB_VBIOS_DIR 里的同名文件（只在它确实存在时替换）
+resolve() {
+  local a=${1:-} dir
+  case $a in
+    '' | -* | */*) printf '%s\n' "$a"; return 0 ;;
+  esac
+  dir=$(wb_conf_get_default WB_VBIOS_DIR /var/lib/libvirt/vbios)
+  if [[ -f $dir/$a ]]; then printf '%s\n' "$dir/$a"; else printf '%s\n' "$a"; fi
+}
+
+usage() {
+  cat >&2 <<'EOF'
+用法: winbox rom <子命令> [参数…]
+
+  build                        构建 romtool（首次使用会自动构建）
+  info FILE [--json]           结构报告：头 / 每个映像的 PCIR / ATOM 签名与 VBIOS 横幅 / SHA256
+  verify [--strict] FILE       结构校验（致命）；校验和默认仅警告（真实 GOP 镜像普遍非 0）
+  patch [--vendor HHHH] [--device HHHH] [--class HHHHHH]
+        [--fix-checksum] [--dry-run] IN OUT
+                               给提取到的镜像盖 ID（默认不动校验和，保持与验证流程逐字节一致）
+  merge --vbios A [--gop B] OUT
+                               把 GOP 镜像追加到 legacy VBIOS 之后
+  dump --bdf DDDD:BB:DD.F OUT  提取本机设备 ROM（需要 root）
+  extract --from BIOS.IMG [--list] [--index N] OUT
+                               在 BIOS 镜像里扫描 ROM 候选
+
+裸文件名会按 WB_VBIOS_DIR（默认 /var/lib/libvirt/vbios）解释。
+完整帮助: winbox rom --help 会把 romtool 的用法一并打印。
+EOF
+  exit "${1:-0}"
+}
+
+SUB=${1:-}
+[[ -n $SUB ]] || usage 0
+case $SUB in
+  -h | --help | help) "$BIN" --help 2>/dev/null || true; usage 0 ;;
+  build)
+    wb_log '== 构建 romtool =='
+    wb_run make -C "$TOOL_DIR" || wb_fail 1 rom "构建失败" "docs/interfaces/03-romtool.md"
+    wb_ok "产物: $BIN"
+    wb_hint '离线自测: make -C src/romtool test（用合成 ROM，不需要硬件）'
+    exit 0 ;;
+esac
+
+ensure_built
+
+# 参数预处理：只把「存在于 ROM 目录的裸文件名」替换成绝对路径
+ARGS=()
+for a in "$@"; do
+  ARGS+=("$(resolve "$a")")
+done
+
+case $SUB in
+  dump)
+    wb_require_root
+    exec "$BIN" dump "${ARGS[@]:1}"
+    ;;
+  *) exec "$BIN" "${ARGS[@]}" ;;
+esac

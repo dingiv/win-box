@@ -10,18 +10,28 @@
 
 ## 项目状态
 
-**基建完成，阶段命令逐个落地中**。需求与契约已定案；已实现：
+**主干完成，剩 `host-prep` / `vm-create` 与文档迁移**。已实现：
 
 ```bash
 scripts/bin/winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
 scripts/bin/winbox adopt         # 接管现有 VM：把身份信息提取到配置
 scripts/bin/winbox conf          # 配置的唯一读写入口
-scripts/bin/winbox vm render      # 按模板渲染域 XML（打印，不生效）
-bash tests/smoke.sh               # 不需要虚拟机/核显/root 验证：142 条断言
+scripts/bin/winbox vm render     # 按模板渲染域 XML（打印，不生效）
+scripts/bin/winbox gpu-attach    # 挂核显：ROM 校验/部署 + 模板重定义
+scripts/bin/winbox lg-prepare    # KVMFR 模块 + 构建 Looking Glass 客户端
+scripts/bin/winbox lg-shmem      # 共享内存设备 + 权限双闸
+scripts/bin/winbox lg            # 起窗口（--idd-prefs 应用客机 IDD 偏好）
+scripts/bin/winbox reset-hook    # 复位轮回钩子（免每次冷启动宿主）
+scripts/bin/winbox status        # 全链路自检（退出码即结论）
+scripts/bin/winbox evidence      # 一键取证包（14 项 + sha256 清单）
+scripts/bin/winbox rom           # ROM 工具（C：info/verify/patch/merge/dump/extract）
+
+bash tests/smoke.sh              # 248 条断言，不需虚拟机/核显/root
+make -C src/romtool test         # 52 条 C 断言，用合成 ROM，不需硬件
 ```
 
-其余命令（`host-prep` / `vm-create` / `lg-prepare` / `lg-shmem` / `lg` / `rom` / `status`…）
-按 `docs/interfaces/` 逐个实现；`winbox --help` 里 ★ 标记的才是已实现。
+未实现：`host-prep`、`vm-create`（从零建机那条路）；`docs/zh` 的实录文档尚未迁入。
+`winbox --help` 里 ★ 标记的才是已实现。
 
 ## 前置要求
 
@@ -110,7 +120,8 @@ win-box/
 不静默兜底（探测不到就报错，不猜不降级）。
 
 **C 的准入门槛**：只有当 shell 不适合时才写 C —— 目前只有 ROM 结构解析/校验/合并
-（`src/romtool/`）。项目里没有 Python。
+（`src/romtool/`，`make test` 用**合成 ROM** 离线自测，仓库内不含任何 AMD 二进制）。
+项目里没有 Python。
 
 **域定义的真相源是模板**：`config/templates/domain.xml.in` + 片段。所有“改 VM 结构”的命令
 （`gpu-attach` / `lg-shmem` / `vm mode`）都是同一个动作：改配置键 → 渲染 → 备份 → `virsh define`

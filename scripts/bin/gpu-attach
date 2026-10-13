@@ -83,13 +83,20 @@ if (( needs_root )); then
   [[ $ROOT_NOW -eq 0 ]] || wb_fail 3 gpu-attach \
     "部署 ROM 到 $VBIOS_DIR 需要 root：sudo winbox gpu-attach --rom $ROM${AROM:+ --audio-rom $AROM}" \
     "docs/interfaces/01-winbox-cli.md"
-  ROMTOOL=$WB_ROOT/src/romtool/romtool
-  if [[ -x $ROMTOOL ]]; then
-    wb_log '    用 romtool 校验 ROM 结构…'
-    "$ROMTOOL" verify "$ROM" >/dev/null 2>&1 || wb_warn "romtool verify 未通过: $ROM（继续，但请核对来源）"
-    [[ -n $AROM && -f $AROM ]] && { "$ROMTOOL" verify "$AROM" >/dev/null 2>&1 || wb_warn "romtool verify 未通过: $AROM"; }
+  # 校验 ROM 结构（winbox rom 会在需要时自动构建 romtool；失败仅警告——
+  # 真实世界的 GOP 镜像校验和普遍非 0，把它们挡在门外反而会让人用不了）
+  wb_log '    用 romtool 校验 ROM 结构…'
+  if "$WB_ROOT/scripts/bin/rom" verify "$ROM" >/dev/null 2>&1; then
+    wb_ok "结构校验通过: $(basename -- "$ROM")"
   else
-    wb_warn "未构建 romtool（make -C src/romtool），跳过 ROM 结构校验"
+    wb_warn "romtool verify 未通过: $ROM（继续，但请核对来源；用 winbox rom info 看细节）"
+  fi
+  if [[ -n $AROM && -f $AROM ]]; then
+    if "$WB_ROOT/scripts/bin/rom" verify "$AROM" >/dev/null 2>&1; then
+      wb_ok "结构校验通过: $(basename -- "$AROM")"
+    else
+      wb_warn "romtool verify 未通过: $AROM"
+    fi
   fi
   wb_log "    部署: $ROM → $VBIOS_DIR"
   wb_gpu_deploy_rom "$ROM" "$VBIOS_DIR/$(basename -- "$ROM")" >/dev/null

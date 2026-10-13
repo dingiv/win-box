@@ -124,7 +124,19 @@ winbox [全局选项] <command> [command 选项]
 
 #### `winbox rom <子命令>`
 
-见 `03-romtool.md`。`winbox rom …` 是 `romtool` 的薄包装（路径解析 + 配置注入），行为与直接调用 `romtool` 一致。
+见 `03-romtool.md`（C 工具 `romtool` 的 CLI 契约）。`winbox rom …` 是薄包装：
+路径解析（裸文件名按 `WB_VBIOS_DIR` 解释）、按需自动构建、`dump` 的 root 前置检查；
+其余参数原样透传，包装层不重新实现任何 ROM 逻辑。
+
+| 子命令 | 用途 |
+| --- | --- |
+| `build` | 构建 romtool（首次使用会自动构建） |
+| `info FILE [--json]` | 结构报告 + ATOM/横幅 + SHA256 |
+| `verify [--strict] FILE` | 结构校验（致命）+ 校验和（默认仅警告） |
+| `patch --vendor --device [--class] [--fix-checksum] [--dry-run] IN OUT` | 盖 ID |
+| `merge --vbios A [--gop B] OUT` | 合并 legacy VBIOS 与 GOP 镜像 |
+| `dump --bdf … OUT` | 提取本机设备 ROM（需 root） |
+| `extract --from BIOS.IMG [--list] [--index N] OUT` | 在 BIOS 镜像里扫 ROM 候选 |
 
 ### 运维转发
 

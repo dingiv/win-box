@@ -35,3 +35,9 @@ src/**/romtool
 # Python 缓存（本项目不使用 Python，防止遗留）
 __pycache__/
 *.pyc
+
+# C 工具的构建与测试产物
+src/romtool/tests/tmp/
+src/romtool/romtool
+src/romtool/tests/mkrom
+src/romtool/*.o
