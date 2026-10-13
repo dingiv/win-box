@@ -1,0 +1,125 @@
+# 接口契约：`winbox` 主入口
+
+> 形式：CLI。本文件是 `winbox --help` 的**唯一真相源**。
+
+## 签名
+
+```
+winbox [全局选项] <command> [command 选项]
+```
+
+全局选项（对所有命令生效）：
+
+| 选项 | 语义 | 默认 |
+| --- | --- | --- |
+| `-c, --config FILE` | 使用指定配置文件 | `config/win-box.conf` |
+| `-n, --dry-run` | 只打印将执行的系统改动，不落盘 | off |
+| `-y, --yes` | 不交互确认（脚本化用） | off |
+| `-q, --quiet` | 只输出错误 | off |
+| `-v, --verbose` | 打印每条被执行的底层命令 | off |
+| `--no-color` | 关闭颜色（日志/CI） | off |
+| `-h, --help` / `--version` | 帮助 / 版本 | — |
+
+**失败语义**（全局）：退出码见 `00-overview.md`；每个命令在失败时**必须**给出 `<stage> + 原因 + 文档锚点`。
+
+---
+
+## 命令清单
+
+### 探测与状态（只读，不需要 root）
+
+#### `winbox detect [--write]`
+
+- **输入**：无（自动探测 IOMMU、AMD 核显 VGA/音频功能、BDF、IOMMU 分组、KVMFR/ivshmem 现状、libvirt 与 OVMF 可用性、Looking Glass submodule 是否存在）
+- **输出**：stdout 打印探测结果表；`--write` 时写入配置文件（原子写，先备份 `win-box.conf.bak`）
+- **失败**：码 4 = 未发现 AMD 核显（附 `lspci -nn` 里 class 0x030000 的候选列表供人工判断）
+- **生命周期**：可重复执行；不产生任何系统改动（除 `--write` 的配置写入）
+
+#### `winbox conf [KEY[=VALUE]]`
+
+- **输入**：无参 = 打印全部配置与来源（默认/文件/环境）；`KEY` = 打印单键；`KEY=VALUE` = 写回配置文件
+- **输出**：stdout
+- **失败**：码 2 = KEY 未知；码 3 = 配置文件不可写
+- **生命周期**：读路径纯查询；写路径幂等（同值重写不产生变更）
+
+#### `winbox status [--host|--guest|--lg] [--json]`
+
+- **输入**：可选的检查面过滤
+- **输出**：分段报告（✓/✗/⚠ 逐项）+ 结论行 `RESULT: OK|DEGRADED|BROKEN`；`--json` 输出同构的 JSON
+- **失败**：**退出码即结论**——`0` = OK（全 ✓）、`6` = DEGRADED（有 ⚠ 无 ✗）、`7` = BROKEN（有 ✗）、`1` = 检查本身无法执行（如 libvirt 连不上）。**注意**：因退出码承载结论，在 `set -e` 的脚本里串联时需显式处理（`winbox status || true`）
+- **生命周期**：纯只读；不需要 root；可在虚拟机运行中/停止时调用
+
+#### `winbox evidence [--out DIR] [--after]`
+
+- **输入**：输出目录（默认 `logs/evidence-<时间戳>/`）；`--after` = VM 关闭后的补采
+- **输出**：一组文本文件（宿主机 GPU/IOMMU/dmesg/libvirt XML/ROM 指纹/客机报告……）+ `manifest.txt`（文件清单与 sha256）
+- **失败**：码 1 = 目录不可写（与 `status` 不同，`evidence` **不**用退出码承载采集内容）
+- **生命周期**：只读采集；采集 `dmesg` 需要 root（缺 root 时跳过该项并标 ⚠，不失败）
+
+### 阶段流程（mutating；标注 sudo 的需 root）
+
+#### `winbox host-prep`
+
+- **输入**：无
+- **输出**：apt 依赖、libvirtd、vfio 模块配置、initramfs 清理（移除 amdgpu）、内核参数、用户组
+- **失败**：码 3 = distro 不在支持列表 / 缺 apt
+- **生命周期**：幂等；执行后**可能需要重启** → 若检测到需要重启，打印提示并以 **码 5** 退出（区别于失败）
+- **依赖**：`lib/sys.sh` `lib/detect.sh`
+
+#### `winbox vm-create [--name N] [--memory MB] [--vcpus N] [--disk GB] [--iso PATH]`
+
+- **输入**：规格参数（默认值来自配置）
+- **输出**：一条 libvirt domain（UEFI + SecureBoot + TPM2 + q35）
+- **失败**：码 3 = 缺 ovmf/swtpm/virt-install；码 2 = VM 名已存在
+- **生命周期**：**不幂等**（重名拒绝而非覆盖）；安装系统本身是人工步骤（打印操作指引）
+
+#### `winbox gpu-attach [--rom FILE] [--audio-rom FILE] [--mode test|inspect|lg]`
+
+- **输入**：ROM 路径（默认从配置的 vbios 目录取）、显示模式
+- **输出**：VM XML 被改为「核显挂专属 pcie-root-port + 双功能 hostdev + ROM + x-vga 开关 + video=none」
+- **失败**：码 3 = VM 正在运行（要求 ACPI 关机后改配置）；码 4 = 未找到核显或 ROM 不存在
+- **生命周期**：幂等（先清理旧 hostdev/ROM 再注入）；改前自动备份 XML 到 `logs/`
+
+#### `winbox lg-prepare [--size MB]`
+
+- **输入**：共享内存大小（默认 128）
+- **输出**：DKMS 装 kvmfr、模块参数/开机加载/udev 权限、从 submodule 源码构建客户端到 `~/.local/bin`
+- **失败**：码 3 = submodule 未初始化（提示 `git submodule update --init`）；码 1 = 构建失败
+- **生命周期**：幂等；**拒绝在 VM 运行中执行**（QEMU 会把 `/dev/kvmfr0` 创造成普通文件，事后难修）
+
+#### `winbox lg-shmem [--size MB] [--remove]`
+
+- **输入**：大小、是否移除
+- **输出**：VM XML 的 `qemu:commandline`（ivshmem-plain + memory-backend-file）
+- **失败**：码 3 = VM 运行中 / `/dev/kvmfr0` 不是字符设备
+- **生命周期**：幂等（先删同类旧参数再注入，保留其他 `qemu:arg`）
+
+#### `winbox reset-hook <install|remove|test>`
+
+- **输入**：动作
+- **输出**：`/etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/10-*.sh` 与日志 `/var/log/winbox-reset.log`
+- **失败**：码 3 = 非 root；`test` 时若 amdgpu 未能绑定 → 码 5（提示需冷启动）
+- **生命周期**：幂等；钩子本体**永远 exit 0**（绝不阻塞 VM 启动）
+
+#### `winbox lg [--] [客户端参数…]`
+
+- **输入**：透传给 Looking Glass 客户端的参数
+- **输出**：前台窗口（Ctrl+C 结束）
+- **失败**：码 3 = 客户端未构建 / `/dev/kvmfr0` 不存在
+- **生命周期**：前台进程；首次运行生成 `~/.config/looking-glass/client.ini`（已存在则不覆盖）
+
+#### `winbox rom <子命令>`
+
+见 `03-romtool.md`。`winbox rom …` 是 `romtool` 的薄包装（路径解析 + 配置注入），行为与直接调用 `romtool` 一致。
+
+### 运维转发
+
+#### `winbox vm <子命令>`
+
+等价于 `vmctl <子命令>`（见 `02-vmctl.md`）。保留 `vmctl` 作为独立可执行文件，方便直接使用。
+
+---
+
+## 附：函数库的可见性
+
+`winbox` 只暴露上表命令。**函数库不是命令行接口**——它是给「场景 4 单点重放」和脚本作者用的（`source scripts/lib/pci.sh` 后直接调用 `wb_pci_bind`）。函数契约见 `04-lib-api.md`。
