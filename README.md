@@ -13,21 +13,21 @@
 **命令全部实现**（`winbox --help` 里带 ★ 的即是）；剩「推送远程仓库」这类工程性事务。
 
 ```bash
-scripts/bin/winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
-scripts/bin/winbox host-prep     # 宿主准备（依赖 / vfio / initramfs / 内核参数；幂等）
-scripts/bin/winbox host-gpu      # 宿主核显姿态开关（直通 / 还给宿主；含冲突检查与 --takeover）
-scripts/bin/winbox adopt         # 接管现有 VM：把身份信息提取到配置
-scripts/bin/winbox vm-create     # 新建 VM（UEFI + TPM2，模板渲染）
-scripts/bin/winbox conf          # 配置的唯一读写入口
-scripts/bin/winbox vm render     # 按模板渲染域 XML（打印，不生效）
-scripts/bin/winbox gpu-attach    # 挂核显：ROM 校验/部署 + 模板重定义
-scripts/bin/winbox lg-prepare    # KVMFR 模块 + 构建 Looking Glass 客户端
-scripts/bin/winbox lg-shmem      # 共享内存设备 + 权限双闸
-scripts/bin/winbox lg            # 起窗口（--idd-prefs 应用客机 IDD 偏好）
-scripts/bin/winbox reset-hook    # 复位轮回钩子（免每次冷启动宿主）
-scripts/bin/winbox status        # 全链路自检（退出码即结论）
-scripts/bin/winbox evidence      # 一键取证包（14 项 + sha256 清单）
-scripts/bin/winbox rom           # ROM 工具（C：info/verify/patch/merge/dump/extract）
+./winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
+./winbox host-prep     # 宿主准备（依赖 / vfio / initramfs / 内核参数；幂等）
+./winbox host-gpu      # 宿主核显姿态开关（直通 / 还给宿主；含冲突检查与 --takeover）
+./winbox adopt         # 接管现有 VM：把身份信息提取到配置
+./winbox vm-create     # 新建 VM（UEFI + TPM2，模板渲染）
+./winbox conf          # 配置的唯一读写入口
+./winbox vm render     # 按模板渲染域 XML（打印，不生效）
+./winbox gpu-attach    # 挂核显：ROM 校验/部署 + 模板重定义
+./winbox lg-prepare    # KVMFR 模块 + 构建 Looking Glass 客户端
+./winbox lg-shmem      # 共享内存设备 + 权限双闸
+./winbox lg            # 起窗口（--idd-prefs 应用客机 IDD 偏好）
+./winbox reset-hook    # 复位轮回钩子（免每次冷启动宿主）
+./winbox status        # 全链路自检（退出码即结论）
+./winbox evidence      # 一键取证包（14 项 + sha256 清单）
+./winbox rom           # ROM 工具（C：info/verify/patch/merge/dump/extract）
 
 bash tests/smoke.sh              # 261 条断言，不需虚拟机/核显/root
 make -C src/romtool test         # 52 条 C 断言，用合成 ROM，不需硬件
@@ -54,24 +54,32 @@ Looking Glass 的 IDD 安装包。这些用脚本在你自己的机器上提取�
 git clone --recurse-submodules <本仓库>
 cd win-box
 
-scripts/bin/winbox detect --write     # 1. 探测硬件与环境，生成 config/win-box.conf
-sudo scripts/bin/winbox host-prep     # 2. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能要重启
+./winbox detect --write     # 1. 探测硬件与环境，生成 config/win-box.conf
+sudo ./winbox host-prep     # 2. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能要重启
 #   已有虚拟机的人到这一步就够了：下面 3 换成 adopt
-winbox adopt                          # 3a.（推荐）接管现有 VM：把身份信息提取到配置
+./winbox adopt                          # 3a.（推荐）接管现有 VM：把身份信息提取到配置
 #   或从零新建：
-sudo winbox vm-create                 # 3b. 建机（UEFI + TPM2），然后手工装 Windows
-sudo scripts/bin/winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg   # 4. 挂核显
-sudo scripts/bin/winbox lg-prepare    # 5. KVMFR 模块 + 构建 Looking Glass 客户端
-sudo scripts/bin/winbox lg-shmem      # 6. 共享内存设备 + 权限双闸
-sudo scripts/bin/winbox reset-hook install   # 7. 复位轮回钩子（免每次冷启动宿主）
-scripts/bin/winbox vm start && scripts/bin/winbox lg   # 8. 开机 + 开窗口
+sudo ./winbox vm-create                 # 3b. 建机（UEFI + TPM2），然后手工装 Windows
+sudo ./winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg   # 4. 挂核显
+sudo ./winbox lg-prepare    # 5. KVMFR 模块 + 构建 Looking Glass 客户端
+sudo ./winbox lg-shmem      # 6. 共享内存设备 + 权限双闸
+sudo ./winbox reset-hook install   # 7. 复位轮回钩子（免每次冷启动宿主）
+./winbox vm start && ./winbox lg   # 8. 开机 + 开窗口
 ```
+
+> 约定：**README 的示例一律写 `./winbox`**（clone 下来即可用，无需配置）；`docs/` 里写裸
+> `winbox` 是为了讲命令语义。想直接敲 `winbox` 就做一次软链——根入口会自行解析软链：
+>
+> ```bash
+> ln -s "$PWD/winbox" ~/.local/bin/winbox
+> ```
+
 
 先干跑看清会改什么（所有 mutating 命令都支持 `--dry-run`，连模板渲染结果都会校验）：
 
 ```bash
-winbox -n host-prep            # 六步只读检查（非 root 也能跑）
-winbox -n vm-create --name test
+./winbox -n host-prep            # 六步只读检查（非 root 也能跑）
+./winbox -n vm-create --name test
 ```
 
 装完系统后在客机内一次性完成：装 AMD 驱动（离线版）→ 装 Looking Glass IDD
@@ -80,9 +88,9 @@ winbox -n vm-create --name test
 日常用：
 
 ```bash
-scripts/bin/winbox status             # 全链路自检（退出码即结论：0 OK / 6 降级 / 7 故障）
-scripts/bin/winbox vm start           # = vmctl start
-scripts/bin/winbox lg                 # 起窗口
+./winbox status             # 全链路自检（退出码即结论：0 OK / 6 降级 / 7 故障）
+./winbox vm start           # = vmctl start
+./winbox lg                 # 起窗口
 ```
 
 ## 目录结构

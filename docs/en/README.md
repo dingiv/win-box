@@ -26,23 +26,23 @@ plus one small C tool.
 git clone --recurse-submodules <this repo>
 cd win-box
 
-scripts/bin/winbox detect --write     # probe hardware → config/win-box.conf
-sudo scripts/bin/winbox host-prep     # deps / vfio / initramfs / kernel params (reboot may be needed)
-scripts/bin/winbox adopt              # adopt an existing VM (extract its identity into the config)
-#   or: scripts/bin/winbox vm-create  # create a new UEFI+TPM2 VM, then install Windows manually
-sudo scripts/bin/winbox gpu-attach    # attach the iGPU (ROM + dedicated root port + display mode)
-sudo scripts/bin/winbox lg-prepare    # KVMFR module + build the Looking Glass client
-sudo scripts/bin/winbox lg-shmem      # shared memory device + the two permission gates
-sudo scripts/bin/winbox reset-hook install
-scripts/bin/winbox vm start && scripts/bin/winbox lg
+./winbox detect --write     # probe hardware → config/win-box.conf
+sudo ./winbox host-prep     # deps / vfio / initramfs / kernel params (reboot may be needed)
+./winbox adopt              # adopt an existing VM (extract its identity into the config)
+#   or: ./winbox vm-create  # create a new UEFI+TPM2 VM, then install Windows manually
+sudo ./winbox gpu-attach    # attach the iGPU (ROM + dedicated root port + display mode)
+sudo ./winbox lg-prepare    # KVMFR module + build the Looking Glass client
+sudo ./winbox lg-shmem      # shared memory device + the two permission gates
+sudo ./winbox reset-hook install
+./winbox vm start && ./winbox lg
 ```
 
 Everyday use:
 
 ```bash
-scripts/bin/winbox status             # whole-chain self check (exit code IS the verdict: 0/6/7)
-scripts/bin/winbox evidence           # evidence bundle with sha256 manifest
-scripts/bin/winbox vm snapshot-save
+./winbox status             # whole-chain self check (exit code IS the verdict: 0/6/7)
+./winbox evidence           # evidence bundle with sha256 manifest
+./winbox vm snapshot-save
 ```
 
 ## Design in one screen

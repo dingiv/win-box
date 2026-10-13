@@ -12,7 +12,9 @@
 set -euo pipefail
 
 WB_SELF=$(basename -- "$0")
-WB_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+# 解析软链：允许把根入口（或本文件）软链到 PATH 里而不失定位
+WB_SELF_PATH=$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+WB_ROOT=$(cd -- "$(dirname -- "$WB_SELF_PATH")/../.." && pwd)
 WB_LIB_DIR="$WB_ROOT/scripts/lib"
 export WB_ROOT WB_SELF WB_LIB_DIR
 

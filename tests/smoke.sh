@@ -614,7 +614,8 @@ miss=$(find . \
   -path '*/tests/tmp' -prune -o \
   \( -name '*.sh' -o -name '*.c' -o -name '*.h' -o -name '*.md' -o -name 'Makefile' \
      -o -name '*.ps1' -o -name '*.in' -o -name '.gitignore' -o -name '.gitattributes' \
-     -o -name '.gitmodules' -o -name 'LICENSE' \) -type f -print \
+     -o -name '.gitmodules' -o -name 'LICENSE' \
+     -o -name 'winbox' -o -path './scripts/bin/*' \) -type f -print \
   | sed 's|^\./||' \
   | while IFS= read -r f; do git ls-files --error-unmatch "$f" >/dev/null 2>&1 || echo "$f"; done)
 if [ -n "$miss" ]; then
@@ -706,6 +707,28 @@ else
   bad "期望码 3（存在冲突配置），实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
 fi
 check '带 --takeover 的干跑可以走完（仍不落盘）' 0 "$WB_ROOT/scripts/bin/winbox" -n host-gpu host --takeover
+
+printf '\n== 23. 仓库根入口 winbox ==\n'
+check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"
+check '根入口已被 git 跟踪' 0 bash -c "cd '$WB_ROOT' && git ls-files --error-unmatch winbox >/dev/null"
+check '根入口 --version' 0 "$WB_ROOT/winbox" --version
+check '根入口无参数时打印用法（码 0）' 0 "$WB_ROOT/winbox"
+check '从其它目录用绝对路径也能跑' 0 bash -c "cd /tmp && '$WB_ROOT/winbox' --version"
+
+# 软链：根入口会解析真实路径，所以软链进 PATH 后仍能找到仓库
+ln -sf "$WB_ROOT/winbox" "$TMP/winbox-link"
+a=$("$TMP/winbox-link" conf WB_VM_NAME 2>/dev/null || true)
+b=$("$WB_ROOT/scripts/bin/winbox" conf WB_VM_NAME 2>/dev/null || true)
+if [[ -n $a && $a == "$b" ]]; then ok "通过软链也能定位仓库（读到同一份配置：$a）"; else bad "软链下定位失败（'$a' vs '$b'）"; fi
+
+# 薄壳不变量：根入口不该长出第二份实现（否则两边迟早不一致）
+code_lines=$(grep -vcE '^[[:space:]]*($|#)' "$WB_ROOT/winbox" || true)
+if (( code_lines <= 6 )) && grep -q 'exec "$root/scripts/bin/winbox"' "$WB_ROOT/winbox"; then
+  ok "根入口是薄壳（$code_lines 行有效代码，只有 exec 转发）"
+else
+  bad "根入口不再是薄壳（$code_lines 行）——实现应只保留在 scripts/bin/winbox 一份"
+fi
+check 'README 的示例用根入口' 0 bash -c "cd '$WB_ROOT' && grep -q './winbox' README.md"
 
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"

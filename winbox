@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# code-master:title win-box · 仓库根入口
+#
+# 用法：
+#   ./winbox <命令> [参数…]          # 在仓库里直接跑
+#   ./winbox --help                  # 命令总览（★ = 已实现）
+#
+# 这是**薄壳**，刻意只做一件事：把参数交给 scripts/bin/winbox。
+# 选项解析、库加载、命令路由、退出码语义全部只有那一份实现——
+# 根入口不是第二份实现，否则迟早两边不一致。
+#
+# 支持软链（自行解析真实路径），所以可以：
+#   ln -s "$PWD/winbox" ~/.local/bin/winbox     # 之后直接敲 winbox
+set -euo pipefail
+
+self=$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+root=$(cd -- "$(dirname -- "$self")" && pwd)
+
+exec "$root/scripts/bin/winbox" "$@"
