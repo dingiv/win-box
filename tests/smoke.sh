@@ -142,6 +142,8 @@ check '没有 python 文件' 0 bash -c "
   cd '$WB_ROOT' && ! find . -name '*.py' -not -path './third_party/*' | grep -q ."
 check 'scripts/bin/* 都有可执行位' 0 bash -c "
   cd '$WB_ROOT' && for f in scripts/bin/*; do [[ -x \$f ]] || exit 1; done"
+check '本机配置（win-box.conf）未被 git 跟踪' 0 bash -c "
+  cd '$WB_ROOT' && ! git ls-files | grep -qx 'config/win-box.conf'"
 
 printf '\n== 10. 探测（只读，不碰硬件）==\n'
 check 'wb_detect_iommu 输出 enabled/disabled' 0 bash -c "
@@ -233,6 +235,141 @@ check 'set -e 下 wb_gpu_reset_cycle 也不中断' 0 bash -c "
   wb_gpu_reset_cycle 1
   echo reached"
 
-printf '\n────────────────────────────\n'
+printf '\n== 14. 模板渲染（完全离线，用 libvirt 自己的 schema 校验）==\n'
+RENDER_CONF=$TMP/render.conf
+cat > "$RENDER_CONF" <<'CONF'
+WB_VM_NAME=testbox
+WB_VM_UUID=11111111-2222-3333-4444-555555555555
+WB_VM_MEMORY_MB=4096
+WB_VM_VCPUS=4
+WB_VM_DISK=/tmp/testbox.qcow2
+WB_VM_MAC=52:54:00:aa:bb:cc
+WB_VM_SECUREBOOT=0
+WB_OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+WB_OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+WB_VIDEO_MODE=lg
+WB_GPU_ATTACHED=1
+WB_GPU_BDF=0000:0d:00.0
+WB_AUDIO_BDF=0000:0d:00.1
+WB_VBIOS_DIR=/tmp/vbios
+WB_VBIOS_GPU=vbios.rom
+WB_VBIOS_AUDIO=audio.rom
+WB_SHMEM_ENABLED=1
+WB_SHM_SIZE_MB=64
+CONF
+
+render() { WB_CONF_PATH="$RENDER_CONF" "$WB_ROOT/scripts/bin/winbox" vm render; }
+R=$TMP/render.xml
+render > "$R" 2>"$TMP/render.err" && ok 'winbox vm render 成功' || { bad 'winbox vm render 失败'; sed 's/^/      /' "$TMP/render.err"; }
+
+check '渲染结果良构（xmllint --noout）' 0 xmllint --noout "$R"
+if [[ -f /usr/share/libvirt/schemas/domain.rng ]]; then
+  check '渲染结果符合 libvirt domain.rng（RELAX NG）' 0 \
+    xmllint --noout --relaxng /usr/share/libvirt/schemas/domain.rng "$R"
+else
+  ok '本机无 libvirt schema，跳过 RNG 校验'
+fi
+
+check 'lg 模式：video=none 且无 x-vga 属性' 0 bash -c "
+  grep -q \"<model type='none'/>\" '$R' && ! grep -q \"name='x-vga'\" '$R'"
+check '直通片段：两个 hostdev + ROM' 0 bash -c "
+  [[ \$(grep -c '<hostdev ' '$R') == 2 ]] && grep -q 'vbios.rom' '$R' && grep -q 'audio.rom' '$R'"
+check '共享内存片段：size 按 MiB 换算（64 → 67108864）' 0 bash -c "
+  grep -q 'ivshmem-plain' '$R' && grep -q 'size&apos;:67108864' '$R'"
+
+check 'test 模式：出现 x-vga=on' 0 bash -c "
+  WB_VIDEO_MODE=test WB_CONF_PATH='$RENDER_CONF' '$WB_ROOT/scripts/bin/winbox' vm render | grep -q \"name='x-vga' type='bool' value='true'\""
+check 'inspect 模式：QXL + 无 x-vga' 0 bash -c "
+  out=\$(WB_VIDEO_MODE=inspect WB_CONF_PATH='$RENDER_CONF' '$WB_ROOT/scripts/bin/winbox' vm render)
+  grep -q \"type='qxl'\" <<< \"\$out\" && ! grep -q \"name='x-vga'\" <<< \"\$out\""
+check '不挂共享内存时无 ivshmem' 0 bash -c "
+  ! WB_SHMEM_ENABLED=0 WB_CONF_PATH='$RENDER_CONF' '$WB_ROOT/scripts/bin/winbox' vm render | grep -q ivshmem"
+check '不挂核显时无 hostdev' 0 bash -c "
+  ! WB_GPU_ATTACHED=0 WB_CONF_PATH='$RENDER_CONF' '$WB_ROOT/scripts/bin/winbox' vm render | grep -q '<hostdev ' "
+check '缺 UUID 时报码 3（而不是渲染出畸形 XML）' 3 bash -c "
+  grep -v '^WB_VM_UUID=' '$RENDER_CONF' > '$TMP/nouuid.conf'
+  WB_CONF_PATH='$TMP/nouuid.conf' '$WB_ROOT/scripts/bin/winbox' vm render"
+check '值含 XML 特殊字符时报码 3' 3 bash -c "
+  cp '$RENDER_CONF' '$TMP/bad.conf'
+  printf '%s\n' 'WB_VM_DISK=/tmp/a&b.qcow2' >> '$TMP/bad.conf'
+  WB_CONF_PATH='$TMP/bad.conf' '$WB_ROOT/scripts/bin/winbox' vm render"
+
+printf '\n== 15. adopt：从样本 XML 提取身份（用假 virsh，离线）==\n'
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/virsh" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *dominfo*) exit 0 ;;
+  *dumpxml*) cat "$WB_ROOT/docs/samples/win11-reference.xml" ;;
+  *domstate*) printf 'shut off\n' ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/virsh"
+OLD_PATH=$PATH
+export PATH="$TMP/bin:$PATH"
+export WB_CONF_PATH="$TMP/adopt.conf"
+
+check 'adopt 能跑通（假 virsh + 样本 XML）' 0 "$WB_ROOT/scripts/bin/winbox" adopt samplevm
+for kv in \
+  'WB_VM_UUID=00000000-1111-2222-3333-444444444444' \
+  'WB_VM_MEMORY_MB=16384' \
+  'WB_VM_VCPUS=8' \
+  'WB_VM_DISK=/var/lib/libvirt/images/win11.gpu-working' \
+  'WB_GPU_BDF=0000:0d:00.0' \
+  'WB_AUDIO_BDF=0000:0d:00.1' \
+  'WB_VIDEO_MODE=test' \
+  'WB_GPU_ATTACHED=1' \
+  'WB_SHMEM_ENABLED=1' \
+  'WB_SHM_SIZE_MB=128' \
+  'WB_ROOTPORT_INDEX=15' \
+  'WB_IGPU_GUEST_BUS=0x0f' \
+  'WB_VBIOS_GPU=vbios_ref_9800x3d.bin' ; do
+  check "adopt 提取 ${kv%%=*}" 0 grep -qx -- "$kv" "$TMP/adopt.conf"
+done
+
+printf '\n== 16. gpu-attach 与 reset-hook（假 virsh，离线）==\n'
+# 本机真实核显 BDF（没核显就跳过——测试不能假设硬件存在）
+GBDF=$(bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/detect.sh'; wb_detect_igpu" 2>/dev/null | awk '/^vga /{print $2}')
+ABDF=$(bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/detect.sh'; wb_detect_igpu" 2>/dev/null | awk '/^audio /{print $2}')
+
+if [[ -n $GBDF ]]; then
+  VBD=$TMP/vbios
+  mkdir -p "$VBD"
+  : > "$VBD/vbios.rom"; : > "$VBD/audio.rom"
+  sed -e '/^WB_VBIOS_DIR=/d' -e '/^WB_GPU_BDF=/d' -e '/^WB_AUDIO_BDF=/d' "$RENDER_CONF" > "$TMP/attach.conf"
+  {
+    printf 'WB_VBIOS_DIR=%s\n' "$VBD"
+    printf 'WB_VBIOS_GPU=vbios.rom\n' 'WB_VBIOS_AUDIO=audio.rom'
+    printf 'WB_GPU_BDF=%s\n' "$GBDF"
+    [[ -n $ABDF ]] && printf 'WB_AUDIO_BDF=%s\n' "$ABDF"
+  } >> "$TMP/attach.conf"
+
+  check 'gpu-attach --mode lg 全流程（假 virsh 下渲染+define）' 0 \
+    env WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" gpu-attach \
+      --rom "$VBD/vbios.rom" --audio-rom "$VBD/audio.rom" --mode lg
+  check 'attach 后配置记录了 lg 模式' 0 grep -qx 'WB_VIDEO_MODE=lg' "$TMP/attach.conf"
+  check 'attach 后配置标记为已挂载' 0 grep -qx 'WB_GPU_ATTACHED=1' "$TMP/attach.conf"
+else
+  ok '本机无 AMD 核显，跳过 gpu-attach 断言'
+fi
+
+HOOKS=$TMP/hooks
+check 'reset-hook install（WB_HOOK_ROOT 覆盖，不需 root）' 0 \
+  env WB_HOOK_ROOT="$HOOKS" WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" reset-hook install
+HOOKFILE=$(find "$HOOKS" -name '10-winbox-reset.sh' -print -quit 2>/dev/null || true)
+check '钩子文件已生成' 0 bash -c "[[ -n '$HOOKFILE' && -x '$HOOKFILE' ]]"
+check '钩子内容调 wb_gpu_reset_cycle 且总 exit 0' 0 bash -c "
+  grep -q wb_gpu_reset_cycle '$HOOKFILE' && grep -qx 'exit 0' '$HOOKFILE'"
+check '钩子里的配置路径是绝对路径（libvirt 环境没有 cwd）' 0 bash -c "
+  grep -q \"^WB_CONF_PATH='/\" '$HOOKFILE'"
+check 'reset-hook remove' 0 \
+  env WB_HOOK_ROOT="$HOOKS" WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" reset-hook remove
+check '卸载后钩子文件消失' 0 bash -c "[[ ! -e '$HOOKFILE' ]]"
+
+export PATH=$OLD_PATH
+unset WB_CONF_PATH
+
+printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

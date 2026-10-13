@@ -28,6 +28,20 @@ vmctl <command> <vm> [args]
 | `snapshot-restore [vm] NAME` | 快照名 | 回滚到该快照 | 码 3 = VM 未关机；码 2 = 快照不存在 |
 | `rm [vm]` | — | 删除 domain + 磁盘 + NVRAM（二次确认，除非 `--yes`） | 码 2 = 未确认；码 3 = VM 运行中 |
 
+### 模板驱动的域定义（本项目特有）
+
+| 子命令 | 输入 | 输出 | 失败语义 |
+| --- | --- | --- | --- |
+| `render` | — | stdout = 按模板渲染出的完整域 XML（不落盘、不生效） | 码 2/3 = 配置/模板有问题 |
+| `redeploy [REASON]` | 可选原因标签（用于日志文件名） | 备份 → 渲染 → `virsh define` → 回读 → 打印前后 diff | 码 1 = define 被拒；码 3 = VM 运行中；码 5 = 有快照时用户取消 |
+| `verify` | — | 回读 `domxml-to-native qemu-argv`，检查 vfio 设备数 / `x-vga=on` / `vga=none` / ivshmem | 码 3 |
+| `mode <test\|inspect\|both\|lg>` | 显示模式 | 写 `WB_VIDEO_MODE` + 重定义；无参数时打印当前模式 | 码 2 |
+| `template-path` | — | stdout = 当前使用的模板路径 | — |
+
+**为何单独列出**：这四个子命令是所有“改 VM 结构”的统一出口。手工 `virsh edit` 的改动会在下一次
+`redeploy` 时被模板覆盖——要改结构就改模板（`config/templates/domain.xml.in`，或复制为
+`config/domain.local.xml` 后改）。
+
 ## 关键语义
 
 1. **绝不用 `destroy` 达成 `shutdown` 的目的**：`snapshot-save` 与 `shutdown` 内部一律走 ACPI；`destroy` 只能由用户显式调用。

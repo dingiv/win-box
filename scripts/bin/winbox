@@ -28,7 +28,7 @@ WB_VERSION=$(cat -- "$WB_ROOT/VERSION" 2>/dev/null || printf 'unknown')
 # 已知命令（顺序即 --help 里的展示顺序）。是否"已实现"由 scripts/bin/<cmd> 是否存在决定，
 # 这样骨架阶段也不会给出误导性的帮助文本。
 WB_COMMANDS=(
-  detect conf status evidence
+  detect conf adopt status evidence
   host-prep vm-create gpu-attach
   lg-prepare lg-shmem reset-hook lg
   rom vm
@@ -77,6 +77,7 @@ wb__cmd_desc() {
   case $1 in
     detect)     printf '探测硬件与环境，生成配置' ;;
     conf)       printf '查看/修改配置（唯一配置入口）' ;;
+    adopt)      printf '接管现有 VM：把身份信息提取到配置，之后由模板接管' ;;
     status)     printf '全链路自检（退出码即结论）' ;;
     evidence)   printf '采集取证包（只读）' ;;
     host-prep)  printf '宿主机一次性准备（依赖/vfio/initramfs/内核参数）' ;;

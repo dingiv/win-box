@@ -1,0 +1,3 @@
+<!-- 固件：Secure Boot 开启（需要 OVMF 的 secboot 版本与已注册密钥） -->
+<feature enabled='yes' name='secure-boot'/>
+<feature enabled='yes' name='enrolled-keys'/>

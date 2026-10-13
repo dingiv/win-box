@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox gpu-attach（scripts/bin/gpu-attach）
+#
+# 契约：docs/interfaces/01-winbox-cli.md ／ 链路：docs/calltrees/02-create-and-attach.md
+#
+# 把核显挂进虚拟机：部署 ROM 对 → 打开直通片段 → 选择显示模式 → 重定义域定义。
+# 所有"改 XML"的动作都走 wb_vm_redeploy（模板渲染），本脚本只负责前置检查与参数落库。
+#
+# 用法：
+#   sudo winbox gpu-attach --rom ~/gpu.rom --audio-rom ~/audio.rom   # 部署并挂载
+#   winbox gpu-attach --mode lg                                     # 只切显示模式（ROM 已在位）
+#   winbox gpu-attach --detach                                      # 摘掉直通
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/detect.sh
+source "$WB_LIB_DIR/detect.sh"
+# shellcheck source=../lib/gpu.sh
+source "$WB_LIB_DIR/gpu.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+
+ROOT_NOW=$(id -u)
+wb_conf_load
+
+ROM='' AROM='' MODE='' DETACH=0
+while (( $# )); do
+  case $1 in
+    --rom)       [[ -n ${2:-} ]] || wb_fail 2 gpu-attach "--rom 需要文件路径" "winbox --help"; ROM=$2; shift 2 ;;
+    --audio-rom) [[ -n ${2:-} ]] || wb_fail 2 gpu-attach "--audio-rom 需要文件路径" "winbox --help"; AROM=$2; shift 2 ;;
+    --mode)      [[ -n ${2:-} ]] || wb_fail 2 gpu-attach "--mode 需要取值" "winbox --help"; MODE=$2; shift 2 ;;
+    --detach)    DETACH=1; shift ;;
+    -h | --help)
+      sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 gpu-attach "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+if (( DETACH )); then
+  wb_log '== 摘掉核显直通 =='
+  wb_vm_detach_igpu
+  wb_ok '已从模板中移除直通片段（ROM 文件保留在 WB_VBIOS_DIR，未删除）'
+  exit 0
+fi
+
+wb_step '1/5' '前置检查'
+wb_xml_require_stopped
+wb_log "    VM: $(wb_conf_get_default WB_VM_NAME win11)（已关机）"
+
+wb_step '2/5' '硬件复核（防止配置写的是另一台机器）'
+GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
+AUDIO_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
+[[ -n $GPU_BDF ]] || wb_fail 3 gpu-attach "未配置 WB_GPU_BDF（先跑 winbox detect --write）" \
+  "docs/interfaces/01-winbox-cli.md"
+igpu=$(wb_detect_igpu "$GPU_BDF") || exit $?
+wb_log "    命中: $(head -1 <<< "$igpu")"
+if [[ -n $AUDIO_BDF ]]; then
+  wb_log "    音频: $(grep '^audio ' <<< "$igpu" || echo '（未找到同槽音频功能，将只挂 VGA）')"
+fi
+
+wb_step '3/5' 'ROM 准备'
+VBIOS_DIR=$(wb_conf_get_default WB_VBIOS_DIR /var/lib/libvirt/vbios)
+if [[ -z $ROM ]]; then
+  ROM="$VBIOS_DIR/$(wb_conf_get_default WB_VBIOS_GPU '')"
+fi
+[[ -f $ROM ]] || wb_fail 3 gpu-attach "ROM 不存在: $ROM（用 winbox rom dump 提取，或 --rom 指定）" \
+  "docs/interfaces/03-romtool.md"
+[[ -n $AROM ]] || AROM="$VBIOS_DIR/$(wb_conf_get_default WB_VBIOS_AUDIO '')"
+
+# 若给了源 ROM 且不在部署目录内 → 部署（需要 root）
+needs_root=0
+[[ $(readlink -f -- "$ROM") != "$VBIOS_DIR"/* ]] && needs_root=1
+[[ -n $AROM && -f $AROM && $(readlink -f -- "$AROM") != "$VBIOS_DIR"/* ]] && needs_root=1
+if (( needs_root )); then
+  [[ $ROOT_NOW -eq 0 ]] || wb_fail 3 gpu-attach \
+    "部署 ROM 到 $VBIOS_DIR 需要 root：sudo winbox gpu-attach --rom $ROM${AROM:+ --audio-rom $AROM}" \
+    "docs/interfaces/01-winbox-cli.md"
+  ROMTOOL=$WB_ROOT/src/romtool/romtool
+  if [[ -x $ROMTOOL ]]; then
+    wb_log '    用 romtool 校验 ROM 结构…'
+    "$ROMTOOL" verify "$ROM" >/dev/null 2>&1 || wb_warn "romtool verify 未通过: $ROM（继续，但请核对来源）"
+    [[ -n $AROM && -f $AROM ]] && { "$ROMTOOL" verify "$AROM" >/dev/null 2>&1 || wb_warn "romtool verify 未通过: $AROM"; }
+  else
+    wb_warn "未构建 romtool（make -C src/romtool），跳过 ROM 结构校验"
+  fi
+  wb_log "    部署: $ROM → $VBIOS_DIR"
+  wb_gpu_deploy_rom "$ROM" "$VBIOS_DIR/$(basename -- "$ROM")" >/dev/null
+  ROM="$VBIOS_DIR/$(basename -- "$ROM")"
+  if [[ -n $AROM && -f $AROM ]]; then
+    wb_gpu_deploy_rom "$AROM" "$VBIOS_DIR/$(basename -- "$AROM")" >/dev/null
+    AROM="$VBIOS_DIR/$(basename -- "$AROM")"
+  else
+    AROM=''
+  fi
+else
+  wb_log "    ROM 已在部署目录: $(basename -- "$ROM")"
+  wb_gpu_rom_fingerprint "$ROM" | sed 's/^/      /'
+  [[ -n $AROM && -f $AROM ]] && wb_gpu_rom_fingerprint "$AROM" | sed 's/^/      /'
+fi
+
+wb_step '4/5' '写入配置并重定义域（模板渲染）'
+[[ -n $MODE ]] && { wb_conf_set WB_VIDEO_MODE "$MODE"; wb_log "    显示模式 → $MODE"; }
+wb_vm_attach_igpu "$ROM" "${AROM:-}"
+
+wb_step '5/5' '结果'
+mode=$(wb_conf_get_default WB_VIDEO_MODE lg)
+wb_ok "核显已挂进 VM（模式: $mode）"
+case $mode in
+  test)    wb_hint '判据是**物理显示器**：接好核显的 HDMI/DP，启动 VM 后看物理屏是否出画面' ;;
+  lg)      wb_hint '下一步：装上共享内存设备（winbox lg-shmem）并启动 VM + Looking Glass 客户端' ;;
+  inspect) wb_hint '启动 VM 后用 SPICE 窗口看客机设备管理器里 Radeon 的状态' ;;
+  both)    wb_hint 'SPICE 与物理显示器同时可用（实验组合）' ;;
+esac
+wb_hint '启动前请确认核显已归 vfio-pci：winbox status --host'

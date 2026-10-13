@@ -42,6 +42,17 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 2 = KEY 未知；码 3 = 配置文件不可写
 - **生命周期**：读路径纯查询；写路径幂等（同值重写不产生变更）
 
+#### `winbox adopt [VM_NAME]`
+
+- **输入**：要接管的虚拟机名（默认用配置里的 `WB_VM_NAME`）
+- **输出**：把该 VM 的**身份信息**提取到配置——名称/UUID/内存/vCPU/机器类型/SecureBoot/OVMF/nvram/磁盘/ISO/MAC/网络，以及核显 BDF 与 ROM 路径、视频型号与 x-vga、共享内存开关与尺寸、root port 与客机侧地址
+- **失败**：码 3 = VM 不存在或读不到定义
+- **生命周期**：**只读**（不碰域定义，只读 `dumpxml`）；提取结果写入配置（受 `--dry-run` 控制）
+- **为什么需要**：本项目用模板渲染而不是就地编辑 XML；对已有 VM，模板必须先知道它的身份参数，否则重定义会把磁盘/网络/NVRAM 换掉
+
+> `adopt` 之后不要再用 `virsh edit`：手工改动会在下一次渲染时被覆盖。
+> 要改结构就改 `config/templates/domain.xml.in`（或复制为 `config/domain.local.xml` 后改），再 `winbox vm redeploy`。
+
 #### `winbox status [--host|--guest|--lg] [--json]`
 
 - **输入**：可选的检查面过滤
@@ -73,12 +84,12 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 3 = 缺 ovmf/swtpm/virt-install；码 2 = VM 名已存在
 - **生命周期**：**不幂等**（重名拒绝而非覆盖）；安装系统本身是人工步骤（打印操作指引）
 
-#### `winbox gpu-attach [--rom FILE] [--audio-rom FILE] [--mode test|inspect|lg]`
+#### `winbox gpu-attach [--rom FILE] [--audio-rom FILE] [--mode test|inspect|lg|both] [--detach]`
 
-- **输入**：ROM 路径（默认从配置的 vbios 目录取）、显示模式
-- **输出**：VM XML 被改为「核显挂专属 pcie-root-port + 双功能 hostdev + ROM + x-vga 开关 + video=none」
-- **失败**：码 3 = VM 正在运行（要求 ACPI 关机后改配置）；码 4 = 未找到核显或 ROM 不存在
-- **生命周期**：幂等（先清理旧 hostdev/ROM 再注入）；改前自动备份 XML 到 `logs/`
+- **输入**：ROM 路径（默认取 `WB_VBIOS_DIR` 里配置的 ROM）、显示模式、`--detach`
+- **输出**：ROM 部署到 `WB_VBIOS_DIR`（sha256 校验）→ 写配置键 → 从模板重定义域定义（含专属 root port + 双功能 hostdev + ROM + 显示模式）
+- **失败**：码 3 = VM 运行中 / ROM 不存在 / 非 root 且需部署；码 4 = 配置的核显 BDF 在当前硬件上不存在
+- **生命周期**：幂等（模板渲染天然幂等）；改前自动备份 XML 到 `logs/`，改后打印前后 diff
 
 #### `winbox lg-prepare [--size MB]`
 
@@ -90,9 +101,9 @@ winbox [全局选项] <command> [command 选项]
 #### `winbox lg-shmem [--size MB] [--remove]`
 
 - **输入**：大小、是否移除
-- **输出**：VM XML 的 `qemu:commandline`（ivshmem-plain + memory-backend-file）
+- **输出**：写 `WB_SHMEM_ENABLED`/`WB_SHM_SIZE_MB` + 从模板重定义域定义（共享内存片段 = `qemu:commandline` 里的 ivshmem-plain + memory-backend-file）
 - **失败**：码 3 = VM 运行中 / `/dev/kvmfr0` 不是字符设备
-- **生命周期**：幂等（先删同类旧参数再注入，保留其他 `qemu:arg`）
+- **生命周期**：幂等（渲染即全量重建）
 
 #### `winbox reset-hook <install|remove|test>`
 
@@ -117,6 +128,21 @@ winbox [全局选项] <command> [command 选项]
 #### `winbox vm <子命令>`
 
 等价于 `vmctl <子命令>`（见 `02-vmctl.md`）。保留 `vmctl` 作为独立可执行文件，方便直接使用。
+子命令包含日常运维（list/status/start/shutdown/snapshot…）与模板驱动的域定义操作（render/redeploy/verify/mode/template-path）。
+
+---
+
+## 附一：vm 定义的真相源是模板，不是 `virsh edit`
+
+```
+config/templates/domain.xml.in          完整域骨架（含 ${WB_*} 占位符）
+config/templates/fragment/*.xml.in      形态片段（视频 / 固件 / 直通 / 共享内存 / x-vga / 光驱）
+config/domain.local.xml                 可选：用户改过的骨架副本（优先于仓库模板）
+```
+
+所有改 VM 结构的命令（`gpu-attach` / `lg-shmem` / `vm mode` / `vm redeploy`）都是**同一个动作**：
+改配置键 → 渲染模板 → 备份 → `virsh define` → 回读校验 → 打印前后 diff。
+因此没有“只改了一半”的中间态，也不需要 XML 编辑工具。
 
 ---
 

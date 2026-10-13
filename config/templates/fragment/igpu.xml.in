@@ -1,0 +1,32 @@
+<!--
+  核显直通：专属 PCIe 根端口 + 两个功能（VGA + HDMI 音频）
+
+  为什么必须有专属根端口：把核显挂在 pcie-root 上与其它设备共享时，客机侧
+  枚举/驱动加载会出问题；社区配方（isc30）与我们的验证都用独立 root port。
+
+  为什么两个功能都要挂、都要 ROM：UEFI 启动下，VGA 功能需要 VBIOS（含 legacy 与/或 GOP），
+  音频功能同样需要 ROM，否则客机侧会出现代码 43。
+
+  地址参数（WB_ROOTPORT_INDEX 与 WB_IGPU_GUEST_BUS）是**成对**的：
+  验证过的组合是 15 / 0x0f。要改就一起改，并用 winbox vm verify 回读确认。
+-->
+<controller type='pci' index='${WB_ROOTPORT_INDEX}' model='pcie-root-port'>
+  <target chassis='${WB_ROOTPORT_CHASSIS}' port='${WB_ROOTPORT_PORT}'/>
+  <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x0'/>
+</controller>
+<hostdev mode='subsystem' type='pci' managed='yes'>
+  <driver name='vfio'/>
+  <source>
+    <address domain='${WB_GPU_DOMAIN}' bus='${WB_GPU_BUS}' slot='${WB_GPU_SLOT}' function='${WB_GPU_FUNCTION}'/>
+  </source>
+  <rom bar='on' file='${WB_VBIOS_DIR}/${WB_VBIOS_GPU}'/>
+  <address type='pci' domain='0x0000' bus='${WB_IGPU_GUEST_BUS}' slot='${WB_IGPU_GUEST_SLOT}' function='0x0' multifunction='on'/>
+</hostdev>
+<hostdev mode='subsystem' type='pci' managed='yes'>
+  <driver name='vfio'/>
+  <source>
+    <address domain='${WB_AUDIO_DOMAIN}' bus='${WB_AUDIO_BUS}' slot='${WB_AUDIO_SLOT}' function='${WB_AUDIO_FUNCTION}'/>
+  </source>
+  <rom file='${WB_VBIOS_DIR}/${WB_VBIOS_AUDIO}'/>
+  <address type='pci' domain='0x0000' bus='${WB_IGPU_GUEST_BUS}' slot='${WB_IGPU_GUEST_SLOT}' function='0x1'/>
+</hostdev>

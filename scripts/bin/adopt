@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox adopt（scripts/bin/adopt）
+#
+# 契约：docs/interfaces/01-winbox-cli.md
+#
+# 把一台**现有**虚拟机的身份信息（名字/UUID/MAC/磁盘/固件/内存/vCPU/直通设备…）
+# 提取到配置里，之后由模板接管它的定义。
+#
+# 为什么需要它：本项目用「模板渲染」而不是「就地编辑 XML」。对已有 VM 来说，
+# 模板渲染必须先知道这台机原来的身份参数（否则重定义会把磁盘/网络/NVRAM 换掉）。
+# adopt 就是那个"把现状写进配置"的只读提取器——它不碰域定义，只读 dumpxml。
+#
+# 用法：
+#   winbox adopt                 # 接管配置里 WB_VM_NAME 指定的 VM（默认 win11）
+#   winbox adopt other-vm        # 接管指定名字的 VM
+#   winbox -n adopt              # 只看提取出什么，不写配置
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+
+wb_conf_load
+
+VM=${1:-}
+[[ -n $VM ]] || VM=$(wb_conf_get_default WB_VM_NAME win11)
+[[ $VM != -* ]] || wb_fail 2 adopt "未知参数: $VM" "winbox --help"
+
+wb_require_cmd virsh
+virsh -c qemu:///system dominfo "$VM" >/dev/null 2>&1 \
+  || wb_fail 3 adopt "VM 不存在: $VM（virsh -c qemu:///system list --all 看看有哪些）" \
+    "docs/interfaces/02-vmctl.md"
+
+XML=$(mktemp -- "${TMPDIR:-/tmp}/winbox-adopt.XXXXXX.xml")
+trap 'rm -f -- "$XML"' EXIT
+virsh -c qemu:///system dumpxml "$VM" > "$XML" 2>/dev/null \
+  || wb_fail 3 adopt "读不到域定义: $VM" "docs/interfaces/02-vmctl.md"
+
+# 提取小工具（只读；利用 libvirt dumpxml 稳定的输出格式）
+grab() { grep -m1 -oE "$1" "$XML" || true; }
+attr_of() { local s=${1:-} n=${2:-}; [[ $s =~ $n=\'([^\']*)\' ]] && printf '%s' "${BASH_REMATCH[1]}"; return 0; }
+
+# 按元素逐个取（每个都是 libvirt 的固定格式）
+xml_name=$(grab '<name>[^<]*</name>');            xml_name=${xml_name#*>};            xml_name=${xml_name%%<*}
+xml_uuid=$(grab '<uuid>[^<]*</uuid>');            xml_uuid=${xml_uuid#*>};            xml_uuid=${xml_uuid%%<*}
+xml_mem=$(grab "<memory unit='[^']*'>[0-9]*</memory>")
+xml_vcpu=$(grab '<vcpu[^>]*>[0-9]*</vcpu>')
+xml_type=$(grab "<type arch='[^']*' machine='[^']*'>")
+xml_loader=$(grab '<loader[^>]*>[^<]*</loader>')
+xml_nvram=$(grab "<nvram template='[^']*'[^>]*>[^<]*</nvram>")
+xml_mac=$(grab "<mac address='[^']*'/>")
+xml_net=$(grab "<source network='[^']*'/>")
+xml_secboot=$(grab "<feature enabled='[a-z]*' name='secure-boot'/>")
+
+MEM_UNIT=$(attr_of "$xml_mem" unit); MEM_VAL=${xml_mem#*>}; MEM_VAL=${MEM_VAL%%<*}
+VCPUS=${xml_vcpu#*>}; VCPUS=${VCPUS%%<*}
+MACHINE=$(attr_of "$xml_type" machine)
+OVMF_CODE=${xml_loader#*>}; OVMF_CODE=${OVMF_CODE%%<*}
+OVMF_VARS=$(attr_of "$xml_nvram" template)
+NVRAM=${xml_nvram#*>}; NVRAM=${NVRAM%%<*}
+MAC=$(attr_of "$xml_mac" address)
+NETWORK=$(attr_of "$xml_net" network)
+SECBOOT=$(attr_of "$xml_secboot" enabled)
+[[ $SECBOOT == yes ]] && SECBOOT=1 || SECBOOT=0
+
+# 内存换算成 MiB
+case $MEM_UNIT in
+  KiB) MEM_MB=$(( MEM_VAL / 1024 )) ;;
+  MiB) MEM_MB=$MEM_VAL ;;
+  GiB) MEM_MB=$(( MEM_VAL * 1024 )) ;;
+  *) MEM_MB=$(( MEM_VAL / 1024 )); wb_warn "内存单位未知（$MEM_UNIT），按 KiB 处理" ;;
+esac
+
+# ── 块结构：磁盘 / 直通设备 / 视频 / 共享内存 ──────────────────────────────
+BLOCKS=$(awk '
+function attr(s, n,   m) {
+  if (match(s, n "='\''[^'\'']*'\''")) return substr(s, RSTART + length(n) + 2, RLENGTH - length(n) - 3)
+  return ""
+}
+BEGIN { in_disk=0; in_hd=0; in_video=0; insrc=0; gotdisk=0; gotcd=0; hdn=0 }
+{
+  l = $0
+  gsub(/^[ \t]+/, "", l)
+  if (l ~ /^<!--/) next
+
+  if (l ~ /^<disk /) { in_disk=1; ddev=attr(l, "device"); dsrc=""; next }
+  if (in_disk) {
+    # 只取第一个 <source>：后面 backingStore 里还有 source（磁盘链），否则会取成最底层基镜像
+    if (l ~ /^<source / && dsrc == "") { dsrc=attr(l, "file") }
+    if (l ~ /^<\/disk>/) {
+      in_disk=0
+      if (ddev == "disk"  && !gotdisk && dsrc != "") { print "WB_VM_DISK=" dsrc; gotdisk=1 }
+      if (ddev == "cdrom" && !gotcd   && dsrc != "") { print "WB_VM_ISO="  dsrc; gotcd=1 }
+    }
+    next
+  }
+
+  if (l ~ /^<hostdev /) { in_hd=1; insrc=0; hdsrc=""; hdrom=""; hdguest=""; next }
+  if (in_hd) {
+    if (l ~ /^<source>/)   { insrc=1; next }
+    if (l ~ /^<\/source>/) { insrc=0; next }
+    if (insrc && l ~ /^<address /) {
+      hdsrc = attr(l, "domain") ":" attr(l, "bus") ":" attr(l, "slot") "." attr(l, "function")
+      gsub(/0x/, "", hdsrc)
+    }
+    if (!insrc && l ~ /^<address [^>]*type=.pci./) {
+      hdguest = attr(l, "bus") " " attr(l, "slot") " " attr(l, "function")
+    }
+    if (l ~ /^<rom /) { hdrom = attr(l, "file") }
+    if (l ~ /^<\/hostdev>/) {
+      in_hd=0; hdn++
+      fn = host_fn(hdsrc)
+      if (fn == "0" || hdn == 1) {
+        print "WB_GPU_BDF=" hdsrc
+        if (hdrom != "") print "WB_VBIOS_GPU_PATH=" hdrom
+        print "WB_IGPU_GUEST_ADDR=" hdguest
+      } else {
+        print "WB_AUDIO_BDF=" hdsrc
+        if (hdrom != "") print "WB_VBIOS_AUDIO_PATH=" hdrom
+      }
+    }
+    next
+  }
+
+  if (l ~ /^<video>/) { in_video=1; next }
+  if (in_video) {
+    if (l ~ /^<model /) { print "WB_VIDEO_MODEL=" attr(l, "type") }
+    if (l ~ /^<\/video>/) { in_video=0 }
+    next
+  }
+
+  if (l ~ /x-vga/) { print "WB_XVGA=" attr(l, "value") }
+  if (l ~ /ivshmem-plain/) { print "WB_SHMEM=1" }
+  if (l ~ /memory-backend-file/ && match(l, /size&apos;:[0-9]+/)) {
+    s = substr(l, RSTART, RLENGTH); sub(/.*:/, "", s); print "WB_SHM_SIZE_BYTES=" s
+  }
+}
+function host_fn(s,   i) { i = index(s, "."); return substr(s, i + 1) }
+' "$XML")
+
+printf '\n== 从 %s 提取的身份信息 ==\n' "$VM"
+printf '  %-22s %s\n' WB_VM_NAME        "$xml_name"
+printf '  %-22s %s\n' WB_VM_UUID        "$xml_uuid"
+printf '  %-22s %s\n' WB_VM_MEMORY_MB   "$MEM_MB"
+printf '  %-22s %s\n' WB_VM_VCPUS       "$VCPUS"
+printf '  %-22s %s\n' WB_MACHINE        "$MACHINE"
+printf '  %-22s %s\n' WB_VM_SECUREBOOT  "$SECBOOT"
+printf '  %-22s %s\n' WB_OVMF_CODE      "$OVMF_CODE"
+printf '  %-22s %s\n' WB_VM_NVRAM       "$NVRAM"
+printf '  %-22s %s\n' WB_VM_MAC         "$MAC"
+printf '  %-22s %s\n' WB_VM_NETWORK     "$NETWORK"
+while IFS='=' read -r k v; do
+  [[ -n $k ]] || continue
+  printf '  %-22s %s\n' "$k" "$v"
+done <<< "$BLOCKS"
+printf '\n'
+
+# 磁盘/ISO 文件不存在时明确警告：渲染出来指向不存在的文件，define 会被拒绝
+while IFS='=' read -r k v; do
+  case $k in
+    WB_VM_DISK | WB_VM_ISO) [[ -f $v ]] || wb_warn "$k 指向的文件不存在: $v" ;;
+  esac
+done <<< "$BLOCKS"
+
+# ── 写进配置 ──────────────────────────────────────────────────────────────
+wb_conf_set WB_VM_NAME       "$xml_name"
+wb_conf_set WB_VM_UUID       "$xml_uuid"
+wb_conf_set WB_VM_MEMORY_MB  "$MEM_MB"
+wb_conf_set WB_VM_VCPUS      "$VCPUS"
+wb_conf_set WB_VM_SECUREBOOT "$SECBOOT"
+wb_conf_set WB_OVMF_CODE     "$OVMF_CODE"
+if [[ -n $OVMF_VARS ]]; then wb_conf_set WB_OVMF_VARS "$OVMF_VARS"; fi
+if [[ -n $NVRAM ]]; then wb_conf_set WB_VM_NVRAM "$NVRAM"; fi
+wb_conf_set WB_VM_MAC        "$MAC"
+if [[ -n $NETWORK ]]; then wb_conf_set WB_VM_NETWORK "$NETWORK"; fi
+if [[ -n $MACHINE ]]; then wb_conf_set WB_MACHINE "$MACHINE"; fi
+
+while IFS='=' read -r k v; do
+  [[ -n $k && -n $v ]] || continue
+  case $k in
+    WB_VM_DISK)   wb_conf_set WB_VM_DISK "$v" ;;
+    WB_VM_ISO)    wb_conf_set WB_VM_ISO  "$v" ;;
+    WB_GPU_BDF)   wb_conf_set WB_GPU_BDF   "$v" ;;
+    WB_AUDIO_BDF) wb_conf_set WB_AUDIO_BDF "$v" ;;
+    WB_VBIOS_GPU_PATH | WB_VBIOS_AUDIO_PATH)
+      path_key=$k; path_val=$v
+      if [[ $path_key == WB_VBIOS_GPU_PATH ]]; then
+        wb_conf_set WB_VBIOS_DIR "$(dirname -- "$path_val")"
+        wb_conf_set WB_VBIOS_GPU "$(basename -- "$path_val")"
+      else
+        wb_conf_set WB_VBIOS_DIR "$(dirname -- "$path_val")"
+        wb_conf_set WB_VBIOS_AUDIO "$(basename -- "$path_val")"
+      fi
+      ;;
+    WB_SHM_SIZE_BYTES) wb_conf_set WB_SHM_SIZE_MB "$(( v / 1048576 ))" ;;
+    WB_SHMEM)          wb_conf_set WB_SHMEM_ENABLED "$v" ;;
+    WB_IGPU_GUEST_ADDR)
+      guest_bus=$(awk '{print $1}' <<< "$v"); guest_slot=$(awk '{print $2}' <<< "$v")
+      if [[ -n $guest_bus ]]; then
+        wb_conf_set WB_IGPU_GUEST_BUS  "$guest_bus"
+        wb_conf_set WB_IGPU_GUEST_SLOT "$guest_slot"
+        wb_conf_set WB_ROOTPORT_INDEX  "$(( guest_bus ))"
+      fi
+      ;;
+    WB_VIDEO_MODEL) video_model=$v ;;
+    WB_XVGA)        xvga=$v ;;
+  esac
+done <<< "$BLOCKS"
+
+# 显示模式：由 (video 型号, x-vga) 反推
+case "${video_model:-none}:${xvga:-false}" in
+  none:true)  wb_conf_set WB_VIDEO_MODE test ;;
+  none:false) wb_conf_set WB_VIDEO_MODE lg ;;
+  qxl:true)   wb_conf_set WB_VIDEO_MODE both ;;
+  qxl:false)  wb_conf_set WB_VIDEO_MODE inspect ;;
+esac
+[[ -n ${video_model:-} ]] || video_model=none
+if [[ -n ${BLOCKS} ]] && grep -q '^WB_GPU_BDF=' <<< "$BLOCKS"; then
+  wb_conf_set WB_GPU_ATTACHED 1
+else
+  wb_conf_set WB_GPU_ATTACHED 0
+fi
+
+if wb_is_dry_run; then
+  wb_log ''
+  wb_log '（--dry-run：以上配置未落盘）'
+else
+  wb_ok "身份信息已写入 $(wb_conf_path)（改前备份 .bak）"
+  wb_hint "预览模板渲染结果: winbox vm render"
+  wb_hint "应用（重定义域）: winbox vm redeploy"
+  wb_hint "注意：重定义会覆盖手工用 virsh edit 改过的内容——以后改结构请改 config/templates/domain.xml.in"
+fi

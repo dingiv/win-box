@@ -99,4 +99,5 @@
 | C 工具优先级 | **先 `romtool`**（可用合成 ROM 做 `make test`，不依赖硬件，陌生人可验证）；`kvmfr-probe` 二期 |
 | 项目定位 | 全栈配方，但**形态偏 shell 函数工具库** + 少量长流程封装；**不保证**在其他环境上工作 |
 | 第三方整合 | `third_party/` 用 **git submodule 钉 commit** |
+| 域定义方式 | **模板渲染，不做就地 XML 编辑**（`config/templates/domain.xml.in` + 片段）；因此不需要 xmlstarlet / python，且渲染结果可离线用 libvirt 自身 RNG schema 校验。代价：手工 `virsh edit` 的改动会被下一次渲染覆盖——改结构要改模板 |
 | 入库边界 | 只入脚本/文档/工具源码；ROM、BIOS dump、ISO、驱动包、日志 `gitignore` |

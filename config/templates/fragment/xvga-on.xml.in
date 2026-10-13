@@ -1,0 +1,19 @@
+<!--
+  x-vga：把直通核显声明为"启动显示适配器"（VGA 仲裁）
+
+  开（test / both 模式）：核显是 Primary GPU，物理显示器上是 UEFI 引导画面与桌面，
+  判据是物理显示器——但也因此会走 POST 设备驱动路径，需要正确的 VBIOS。
+
+  关（lg / inspect 模式）：核显作为**非启动显示适配器**（就像独显直通那样），
+  客机 AMD 驱动不会再被 STATUS_GRAPHICS_NOT_POST_DEVICE_DRIVER 拒绝。
+  Looking Glass 模式下必须关；此时 SPICE 窗口没有画面是正常的。
+
+  alias 必须是核显 VGA 功能的 hostdev 别名——它是 XML 里第一个 hostdev，故为 hostdev0。
+-->
+<qemu:override>
+  <qemu:device alias='hostdev0'>
+    <qemu:frontend>
+      <qemu:property name='x-vga' type='bool' value='true'/>
+    </qemu:frontend>
+  </qemu:device>
+</qemu:override>

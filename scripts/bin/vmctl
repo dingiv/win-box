@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox vm（scripts/bin/vmctl）
+#
+# 契约：docs/interfaces/02-vmctl.md
+#
+# 虚拟机日常运维 + 由模板驱动的域定义操作。
+# 两条硬规则：
+#   * 绝不拿 destroy 当 shutdown 用（强制断电真的损坏过 NTFS）
+#   * 快照是磁盘外部快照，拍之前必须 ACPI 关机
+#
+# 用法: winbox vm <子命令> [参数]
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+
+wb_conf_load
+V=(virsh -c qemu:///system)
+VM=$(wb_conf_get_default WB_VM_NAME win11)
+
+usage() {
+  cat >&2 <<'EOF'
+用法: winbox vm <子命令> [参数]
+
+日常运维:
+  list                 列出所有虚拟机
+  status               状态 + 资源占用
+  start                开机（若装了复位钩子，启动前会自动做一次核显真复位）
+  shutdown             正常关机（ACPI，等待直到关闭；默认超时 180s）
+  destroy              强制断电（危险：曾损坏 NTFS，仅假死时用）
+  console | viewer     打开图形控制台
+  eject                弹出安装 ISO
+  snapshot-save NAME   拍磁盘外部快照（需先关机）
+  snapshot-list        列出快照
+  snapshot-restore NAME 回滚到快照（需先关机）
+
+模板驱动的域定义:
+  render               按模板渲染出 XML 并打印（不落盘、不生效）
+  redeploy             备份 → 渲染 → virsh define → 回读 → 显示前后差异
+  verify               回读 QEMU 参数，确认关键设置真的生效
+  mode <test|inspect|both|lg>
+                       切换显示模式（= 换片段 + 重定义）
+  template-path        打印当前使用的模板文件路径
+EOF
+  exit "${1:-0}"
+}
+
+vm_status() {
+  local info state
+  info=$("${V[@]}" dominfo "$VM" 2>/dev/null) || wb_fail 3 vm "VM 不存在: $VM" "docs/interfaces/01-winbox-cli.md"
+  state=$(awk -F: '/^State/{gsub(/^ +/,"",$2); print $2}' <<< "$info")
+  printf '  %-16s %s\n' 名称 "$VM"
+  printf '  %-16s %s\n' 状态 "$state"
+  printf '  %-16s %s\n' vCPU "$(awk -F: '/^CPU\(s\)/{gsub(/ /,"",$2); print $2}' <<< "$info")"
+  printf '  %-16s %s\n' 内存 "$(awk -F: '/^Max memory/{gsub(/^ +/,"",$2); print $2}' <<< "$info")"
+  if [[ $state == running ]]; then
+    local ip
+    ip=$("${V[@]}" domifaddr "$VM" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1 | head -1 || true)
+    printf '  %-16s %s\n' IP "${ip:-（未知）}"
+  fi
+}
+
+snapshot_warn_restore() {
+  wb_hint '回滚后第一次启动可能需要复位钩子或冷启动宿主（核显复位 bug）'
+}
+
+CMD=${1:-}
+[[ -n $CMD ]] || usage 0
+shift || true
+
+case $CMD in
+  -h | --help | help) usage 0 ;;
+  list)
+    "${V[@]}" list --all || wb_fail 1 vm "libvirt 不可连（systemctl start libvirtd）" "docs/interfaces/02-vmctl.md"
+    ;;
+  status) vm_status ;;
+  start)
+    state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
+    [[ $state == shutoff ]] || wb_fail 3 vm "VM $VM 已是 $state" "docs/interfaces/02-vmctl.md"
+    wb_run "${V[@]}" start "$VM" || wb_fail 1 vm "启动失败（看 /var/log/libvirt/qemu/$VM.log 与复位日志）" \
+      "docs/calltrees/03-vm-start-and-reset-hook.md"
+    wb_ok "已启动 $VM"
+    ;;
+  shutdown)
+    state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
+    [[ $state == running ]] || { wb_ok "VM 本就不在运行（$state）"; exit 0; }
+    wb_run "${V[@]}" shutdown "$VM" || wb_fail 1 vm "关机请求失败" "docs/interfaces/02-vmctl.md"
+    wb_log '  等待客机自行关闭（最多 180 秒）…'
+    for _ in $(seq 1 180); do
+      [[ $("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ') == shutoff ]] && { wb_ok '已关闭'; exit 0; }
+      sleep 1
+    done
+    wb_fail 1 vm "等待超时：客机没有响应 ACPI 关机（可用 winbox vm destroy，但先考虑客机内是否卡住）" \
+      "docs/interfaces/02-vmctl.md"
+    ;;
+  destroy)
+    wb_warn 'destroy = 强制断电。曾经因此损坏过 NTFS；只有客机彻底假死时才用'
+    wb_confirm "确认强制断电 $VM?" || wb_fail 5 vm "已取消" "docs/interfaces/02-vmctl.md"
+    wb_run "${V[@]}" destroy "$VM"
+    ;;
+  console)
+    wb_have_cmd virt-manager || wb_fail 3 vm "未安装 virt-manager" "docs/interfaces/02-vmctl.md"
+    exec virt-manager --connect qemu:///system --show-domain-console "$VM"
+    ;;
+  viewer)
+    wb_have_cmd virt-viewer || wb_fail 3 vm "未安装 virt-viewer" "docs/interfaces/02-vmctl.md"
+    exec virt-viewer --connect qemu:///system "$VM"
+    ;;
+  eject)
+    wb_run "${V[@]}" change-media "$VM" sdb --eject --config >/dev/null 2>&1 || true
+    wb_ok "已弹出安装介质（若本来就没有光驱，此操作无副作用）"
+    ;;
+  snapshot-save)
+    NAME=${1:-}
+    [[ -n $NAME ]] || wb_fail 2 vm "需要快照名: winbox vm snapshot-save <名字>" "winbox vm --help"
+    state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
+    [[ $state == shutoff ]] || wb_fail 3 vm "先关机（当前 $state）——磁盘快照必须在关机状态拍" "docs/interfaces/02-vmctl.md"
+    wb_run "${V[@]}" snapshot-create-as "$VM" "$NAME" --disk-only --atomic --no-metadata \
+      || wb_fail 1 vm "快照失败（名字重复？磁盘链有问题？）" "docs/interfaces/02-vmctl.md"
+    wb_ok "快照已创建: $NAME"
+    "${V[@]}" snapshot-list "$VM"
+    ;;
+  snapshot-list) "${V[@]}" snapshot-list "$VM" ;;
+  snapshot-restore)
+    NAME=${1:-}
+    [[ -n $NAME ]] || wb_fail 2 vm "需要快照名" "winbox vm --help"
+    state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
+    [[ $state == shutoff ]] || wb_fail 3 vm "先关机（当前 $state）" "docs/interfaces/02-vmctl.md"
+    wb_run "${V[@]}" snapshot-revert "$VM" "$NAME" || wb_fail 1 vm "回滚失败" "docs/interfaces/02-vmctl.md"
+    wb_ok "已回滚到 $NAME"
+    snapshot_warn_restore
+    ;;
+  template-path) wb_xml_template_path ;;
+  render)
+    wb_xml_vars_init
+    wb_xml_prepare_fragments
+    wb_xml_render "$(wb_xml_template_path)"
+    ;;
+  redeploy)
+    wb_xml_require_stopped
+    wb_vm_redeploy "${1:-manual}"
+    ;;
+  verify)
+    wb_xml_vars_init
+    wb_vm_verify_xml
+    ;;
+  mode)
+    MODE=${1:-}
+    [[ -n $MODE ]] || {
+      wb_log "当前模式: $(wb_conf_get_default WB_VIDEO_MODE lg)"
+      usage 2
+    }
+    wb_xml_require_stopped
+    wb_vm_set_video_mode "$MODE"
+    ;;
+  *) wb_fail 2 vm "未知子命令: $CMD" "winbox vm --help" ;;
+esac

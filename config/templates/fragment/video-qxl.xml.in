@@ -1,0 +1,2 @@
+<!-- QXL 虚拟显卡：用于"取证模式"——在 SPICE 窗口里看客机内部状态 -->
+<model type='qxl' ram='65536' vram='65536' vgamem='32768' heads='1'/>

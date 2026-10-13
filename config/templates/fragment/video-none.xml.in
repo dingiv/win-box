@@ -1,0 +1,2 @@
+<!-- 无虚拟显卡：核显是客机唯一的显示适配器（或 Looking Glass 模式下由 IDD 承担桌面） -->
+<model type='none'/>

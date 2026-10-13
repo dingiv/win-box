@@ -54,20 +54,42 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 
 | 键 | 含义 | 默认 | 由谁写 |
 | --- | --- | --- | --- |
-| `WB_VM_NAME` | 虚拟机名 | `win11` | 用户 |
+| **硬件** | | | |
 | `WB_GPU_BDF` | 核显 VGA 功能 PCI 地址 | 探测 | `detect --write` |
 | `WB_AUDIO_BDF` | 核显 HDMI 音频功能 | 探测 | `detect --write` |
-| `WB_GPU_ID` | `vendor:device`（十进制或十六进制） | 探测 | `detect --write` |
+| `WB_GPU_ID` | `vendor:device` | 探测 | `detect --write` |
+| `WB_AUDIO_ID` | 音频功能 `vendor:device` | 探测 | `detect --write` |
 | `WB_IOMMU_GROUP` | 核显所在 IOMMU 组 | 探测 | `detect --write` |
-| `WB_VBIOS_DIR` | ROM 部署目录 | `/var/lib/libvirt/vbios` | 用户 |
-| `WB_VBIOS_GPU` | VGA 功能 ROM 文件名 | 探测 | `detect --write` |
-| `WB_VBIOS_AUDIO` | 音频功能 ROM 文件名 | 探测 | `detect --write` |
-| `WB_SHM_SIZE_MB` | KVMFR 共享内存 | `128` | 用户 |
-| `WB_LG_SRC` | Looking Glass 源码目录 | `third_party/LookingGlass` | 用户 |
-| `WB_LG_CLIENT` | 客户端二进制路径 | `~/.local/bin/looking-glass-client` | 用户 |
-| `WB_GUEST_USER` | 客机 SSH 账号 | 空（未配置则 `status --guest` 跳过） | 用户 |
-| `WB_GUEST_HOST` | 客机 IP/主机名 | 空 | 用户 |
-| `WB_REBOOT_WAIT` | 复位后等待秒数 | `30` | 用户 |
+| **ROM** | | | |
+| `WB_VBIOS_DIR` | ROM 部署目录 | `/var/lib/libvirt/vbios` | 用户 / `gpu-attach` |
+| `WB_VBIOS_GPU` | VGA 功能 ROM 文件名 | — | `gpu-attach` / `adopt` |
+| `WB_VBIOS_AUDIO` | 音频功能 ROM 文件名 | — | `gpu-attach` / `adopt` |
+| **VM 身份**（模板渲染必需） | | | |
+| `WB_VM_NAME` | 虚拟机名 | `win11` | 用户 / `adopt` |
+| `WB_VM_UUID` | 域 UUID（必须固定：变了等于换机，Windows 可能重新激活） | — | `adopt` / `vm-create` |
+| `WB_VM_MEMORY_MB` | 内存 | `16384` | 用户 / `adopt` |
+| `WB_VM_VCPUS` | vCPU 数（同时也是拓扑 cores） | `8` | 用户 / `adopt` |
+| `WB_VM_DISK` | 系统盘文件路径 | — | `adopt` / `vm-create` |
+| `WB_VM_ISO` | 安装镜像（空 = 不挂光驱） | 空 | 用户 |
+| `WB_VM_MAC` | 网卡 MAC（固定：变了客机会当新网卡） | — | `adopt` / `vm-create` |
+| `WB_VM_NETWORK` | 网络名 | `default` | 用户 |
+| `WB_VM_NVRAM` | NVRAM 文件路径 | — | `adopt` / `vm-create` |
+| `WB_MACHINE` | 机器类型 | `q35` | 用户（接管现有 VM 时沿用原值） |
+| `WB_VM_SECUREBOOT` | Secure Boot（1/0） | `0` | 用户 |
+| `WB_OVMF_CODE` / `WB_OVMF_VARS` | OVMF 固件与变量模板路径 | Ubuntu 默认路径 | 用户 / `adopt` |
+| **形态开关**（决定模板用哪些片段） | | | |
+| `WB_VIDEO_MODE` | `test` / `lg` / `inspect` / `both` | `lg` | `vm mode` / `adopt` |
+| `WB_GPU_ATTACHED` | 是否挂核显（1/0） | `0` | `gpu-attach` / `adopt` |
+| `WB_SHMEM_ENABLED` | 是否挂共享内存（1/0） | `0` | `lg-shmem` / `adopt` |
+| `WB_ROOTPORT_INDEX` / `WB_ROOTPORT_CHASSIS` / `WB_ROOTPORT_PORT` | 专属 root port 参数 | `15` / `15` / `0x0` | 用户 |
+| `WB_IGPU_GUEST_BUS` / `WB_IGPU_GUEST_SLOT` | 客机侧 PCI 地址（与 root port 成对） | `0x0f` / `0x00` | 用户 |
+| **Looking Glass** | | | |
+| `WB_SHM_SIZE_MB` | KVMFR 共享内存（必须与模块参数一致） | `128` | 用户 |
+| `WB_LG_SRC` | 客户端源码目录 | `third_party/LookingGlass` | 用户 |
+| `WB_LG_CLIENT` | 客户端二进制路径 | — | 用户 |
+| **客机通道 / 复位** | | | |
+| `WB_GUEST_USER` / `WB_GUEST_HOST` | 客机 SSH（空 = 相关检查降级为 ⚠ 并跳过） | 空 | 用户 |
+| `WB_REBOOT_WAIT` | 复位时等 amdgpu 初始化的秒数 | `30` | 用户 |
 
 ## `lib/sys.sh` — 环境守卫
 
@@ -130,20 +152,49 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 | `wb_gpu_rom_fingerprint FILE` | stdout = `sha256前16位 大小 路径` |
 | `wb_gpu_bind_vfio` | 两个功能绑到 vfio-pci（= `wb_pci_bind` ×2，带前置检查） |
 
-## `lib/xml.sh` — VM 定义编辑
+## `lib/xml.sh` — 域定义（**模板渲染**）
+
+**这一节是项目最重要的架构决策**：域定义不"就地编辑"，而是**从模板渲染**。
+
+```
+config/templates/domain.xml.in           完整域骨架（含 ${WB_*} 占位符）
+config/templates/fragment/*.xml.in       形态片段（视频/固件/直通/共享内存/x-vga/光驱）
+config/domain.local.xml                  可选：用户改过的骨架副本（优先级高于仓库模板）
+```
+
+**为什么**：Libvirt 域 XML 极难用 shell 可靠地改写（需要 xmlstarlet 或 python），而本项目只允许 bash + C。
+模板渲染把"改 XML"变成"纯文本替换"，于是：不需要 XML 工具、不需要 Python、**且可以完全离线验证**
+（测试用 `xmllint --relaxng /usr/share/libvirt/schemas/domain.rng` 跑 libvirt 自己的 schema）。
+
+代价（已接受并写入文档）：**手工 `virsh edit` 的改动会被下一次渲染覆盖**。
+改结构请改模板文件，然后 `winbox vm redeploy`。
 
 | 函数 | 语义 | 失败 |
 | --- | --- | --- |
-| `wb_xml_dump [FILE]` | `virsh dumpxml` 到文件（默认 `logs/`），**改前必先 dump** | 码 1 |
-| `wb_xml_define FILE` | `virsh define` 并回读验证 | 码 1 |
-| `wb_xml_require_stopped` | VM 非 `shut off` 时报错 | 码 3 |
-| `wb_vm_set_video_mode test\|inspect\|both\|lg` | 四种显示模式的整体切换（`video=none`/QXL + `x-vga` 开关组合） | 码 2 |
-| `wb_vm_attach_igpu ROM AUDIO_ROM` | 注入专属 root port + 双功能 hostdev + ROM | 码 4 |
-| `wb_vm_detach_igpu` | 移除（幂等） | 码 1 |
-| `wb_vm_attach_shmem SIZE_MB` / `wb_vm_detach_shmem` | ivshmem `qemu:commandline` 注入/移除（保留其他 `qemu:arg`） | 码 3 |
-| `wb_vm_verify_xml` | 用 `domxml-to-native qemu-argv` 回读关键参数 | 码 1 |
+| `wb_xml_template_path` | stdout = 模板路径（`$WB_XML_TEMPLATE` > `config/domain.local.xml` > 仓库模板） | — |
+| `wb_xml_fragment_path NAME` | stdout = 片段路径 | — |
+| `wb_xml_vars_init` | 构造变量表（环境变量 > 配置 > 内置默认），推导 BDF 分量与共享内存字节数；缺 VM 身份 → 码 3 | 码 3 |
+| `wb_xml_prepare_fragments` | 按 `WB_VIDEO_MODE` / `WB_VM_SECUREBOOT` / `WB_GPU_ATTACHED` / `WB_SHMEM_ENABLED` / `WB_VM_ISO` 选出片段并渲染到 `WB_XML_FRAGMENT_*` | 码 2/3 |
+| `wb_xml_render [TEMPLATE] [NAME=VALUE…]` | stdout = 渲染结果；严格模式：未知占位符、含 `& < > " '` 的值都报错 | 码 3 |
+| `wb_xml_render_fragment NAME` | 渲染单个片段（空名 → 空输出） | 码 3 |
+| `wb_xml_render_file TEMPLATE OUT` | 渲染到文件（temp+rename；受 `--dry-run` 控制） | 码 3 |
+| `wb_xml_dump [FILE]` | stdout = 备份文件路径（默认 `logs/<时间戳>-<vm>-<操作>.xml`）；**改动前必调** | 码 3 |
+| `wb_xml_require_stopped` | VM 必须 `shut off`（否则码 3）；VM 不存在也是码 3 | 码 3 |
+| `wb_xml_define FILE` | `virsh define`；被拒绝 → 码 1（渲染结果不合法） | 码 1 |
+| `wb_vm_redeploy REASON` | **唯一的"改 XML"入口**：快照警告与确认 → 备份 → 渲染 → define → 回读 → 打印前后 diff | 码 1/3/5 |
+| `wb_vm_verify_xml` | `domxml-to-native qemu-argv` 回读，检查 vfio 设备数 / `x-vga=on` / `vga=none` / ivshmem | 码 3 |
+| `wb_vm_set_video_mode test\|inspect\|both\|lg` | 写 `WB_VIDEO_MODE` + 重定义（= 换片段） | 码 2 |
+| `wb_vm_attach_igpu ROM AUDIO_ROM` / `wb_vm_detach_igpu` | 写 ROM 键 与 `WB_GPU_ATTACHED` + 重定义 | 码 3 |
+| `wb_vm_attach_shmem [SIZE_MB]` / `wb_vm_detach_shmem` | 写 `WB_SHMEM_ENABLED`（+ 尺寸）+ 重定义 | 码 3 |
 
-**实现选择**：XML 编辑优先用 `virsh edit` 的正则替换还是 python3 ElementTree，由实现阶段决定——**契约只要求幂等与保序**（不许重排无关元素）。
+**形态矩阵**（片段选择的唯一真相）：
+
+| `WB_VIDEO_MODE` | 视频片段 | x-vga | 用途与判据 |
+| --- | --- | --- | --- |
+| `test` | `video-none` | on | 核显是 Primary GPU；判据是**物理显示器** |
+| `lg` | `video-none` | off | 核显是非启动显示适配器（避开 `0xC01E0438`）；Look. Glass 的正确形态 |
+| `inspect` | `video-qxl` | off | QXL：在 SPICE 窗口里看客机内部（设备管理器/事件查看器） |
+| `both` | `video-qxl` | on | 双显示（实验组合） |
 
 ## `lib/lg.sh` — Looking Glass 宿主侧
 

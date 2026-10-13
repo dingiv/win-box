@@ -10,13 +10,18 @@
 
 ## 项目状态
 
-**骨架阶段**。需求与契约已定案，基础设施层（`lib/log.sh`、`lib/sys.sh`、`lib/conf.sh`
-与入口 `winbox`）已实现并有冒烟测试；各阶段命令按 `docs/interfaces/` 逐个实现。
+**基建完成，阶段命令逐个落地中**。需求与契约已定案；已实现：
 
 ```bash
-bash tests/smoke.sh            # 不需要虚拟机/核显/root，验证基础设施层
-scripts/bin/winbox --help      # ★ 标记的命令已实现
+scripts/bin/winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
+scripts/bin/winbox adopt         # 接管现有 VM：把身份信息提取到配置
+scripts/bin/winbox conf          # 配置的唯一读写入口
+scripts/bin/winbox vm render      # 按模板渲染域 XML（打印，不生效）
+bash tests/smoke.sh               # 不需要虚拟机/核显/root 验证：142 条断言
 ```
+
+其余命令（`host-prep` / `vm-create` / `lg-prepare` / `lg-shmem` / `lg` / `rom` / `status`…）
+按 `docs/interfaces/` 逐个实现；`winbox --help` 里 ★ 标记的才是已实现。
 
 ## 前置要求
 
@@ -40,14 +45,18 @@ git clone --recurse-submodules <本仓库>
 cd win-box
 
 scripts/bin/winbox detect --write     # 1. 探测硬件与环境，生成 config/win-box.conf
-sudo scripts/bin/winbox host-prep     # 2. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能需重启
-scripts/bin/winbox vm-create          # 3. 建机（UEFI + SecureBoot + TPM2），然后手工装 Windows
-sudo scripts/bin/winbox gpu-attach    # 4. 把核显挂进去（ROM + 专属 root port + 显示模式）
-sudo scripts/bin/winbox lg-prepare    # 5. KVMFR 模块 + 构建 Looking Glass 客户端
-sudo scripts/bin/winbox lg-shmem      # 6. 把共享内存设备挂进虚拟机
-sudo scripts/bin/winbox reset-hook install   # 7. 复位轮回钩子（免每次冷启动宿主）
-scripts/bin/winbox lg                 # 8. 开窗口
+scripts/bin/winbox adopt              # 2.（已有 VM 时）接管它：提取身份信息到配置
+sudo scripts/bin/winbox host-prep     # 3. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能需重启
+scripts/bin/winbox vm-create          # 4. 建机（UEFI + TPM2），然后手工装 Windows
+sudo scripts/bin/winbox gpu-attach    # 5. 把核显挂进去（ROM + 专属 root port + 显示模式）
+sudo scripts/bin/winbox lg-prepare    # 6. KVMFR 模块 + 构建 Looking Glass 客户端
+sudo scripts/bin/winbox lg-shmem      # 7. 把共享内存设备挂进虚拟机
+sudo scripts/bin/winbox reset-hook install   # 8. 复位轮回钩子（免每次冷启动宿主）
+scripts/bin/winbox lg                 # 9. 开窗口
 ```
+
+已有虚拟机的人可以直接跳到 `adopt` → `gpu-attach`：`adopt` 会把现有身份（UUID/磁盘/固件/网卡）写进配置，
+之后这台机的域定义就由模板接管。
 
 装完系统后在客机内一次性完成：装 AMD 驱动（离线版）→ 装 Looking Glass IDD
 （`/S /ivshmem`）→ 开 SSH 通道 → 应用 IDD 偏好。细节见 `docs/zh/`。
@@ -69,7 +78,9 @@ win-box/
 │   ├── lib/*.sh             函数库（L3）：可 source、可单独调用，无副作用约定
 │   └── bin/*                长流程封装（L1/L2）：可执行、可中断、支持 --dry-run
 ├── src/romtool/             C 工具（仅用于 shell 不适合的二进制/设备操作）
-├── config/win-box.conf.example   唯一配置入口的样板（真实配置被 gitignore）
+├── config/
+│   ├── win-box.conf.example 唯一配置入口的样板（真实配置被 gitignore）
+│   └── templates/           域 XML 模板与形态片段（VM 定义的真相源）
 ├── docs/
 │   ├── interfaces/          对外契约：命令、函数库 API、C 工具 CLI
 │   ├── calltrees/           端到端链路：复位轮回、Looking Glass 全链、自检取证…
@@ -100,6 +111,11 @@ win-box/
 
 **C 的准入门槛**：只有当 shell 不适合时才写 C —— 目前只有 ROM 结构解析/校验/合并
 （`src/romtool/`）。项目里没有 Python。
+
+**域定义的真相源是模板**：`config/templates/domain.xml.in` + 片段。所有“改 VM 结构”的命令
+（`gpu-attach` / `lg-shmem` / `vm mode`）都是同一个动作：改配置键 → 渲染 → 备份 → `virsh define`
+→ 回读 → 打印 diff。所以不需要 XML 编辑工具，而且渲染结果能用 libvirt 自己的 schema 离线校验。
+代价写在明处：**手工 `virsh edit` 的改动会被下一次渲染覆盖** —— 改结构请改模板。
 
 ## 文档地图
 

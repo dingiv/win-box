@@ -1,0 +1,140 @@
+<!--
+  win-box 域模板 —— VM 定义的唯一真相源
+
+  用法：由 scripts/lib/xml.sh 的渲染器替换 ${WB_*} 占位符后，经 virsh define 生效。
+  不做就地 XML 编辑，因此不需要 xmlstarlet / python。
+
+  规则：
+    * 占位符只有两种：${WB_*} 普通值；${WB_XML_FRAGMENT_*} 由 config/templates/fragment/ 选出的片段
+    * 值里不能出现 & < > " '（会破坏 XML）；片段例外（它本来就是 XML）
+    * 形态差异（视频/固件/直通设备/共享内存/x-vga）一律靠"换片段"表达，
+      不要在模板里写条件——模板保持线性可读
+
+  要改 VM 结构（加磁盘、调 USB、改网络）时，改这个文件；
+  改完用 `winbox vm redeploy` 生效。不要用 virsh edit —— 下次渲染会覆盖。
+-->
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>${WB_VM_NAME}</name>
+  <uuid>${WB_VM_UUID}</uuid>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo='http://libosinfo.org/xmlns/libvirt/domain/1.0'>
+      <libosinfo:os id='http://microsoft.com/win/11'/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit='MiB'>${WB_VM_MEMORY_MB}</memory>
+  <currentMemory unit='MiB'>${WB_VM_MEMORY_MB}</currentMemory>
+  <memoryBacking>
+    <!-- 直通设备做 DMA 时宿主内存必须锁定，否则会被换出导致客机崩溃 -->
+    <locked/>
+  </memoryBacking>
+  <vcpu placement='static'>${WB_VM_VCPUS}</vcpu>
+  <resource>
+    <partition>/machine</partition>
+  </resource>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='${WB_MACHINE}'>hvm</type>
+    <firmware>
+      ${WB_XML_FRAGMENT_FIRMWARE}
+    </firmware>
+    <loader readonly='yes' type='pflash' format='raw'>${WB_OVMF_CODE}</loader>
+    <nvram template='${WB_OVMF_VARS}' templateFormat='raw' format='raw'>${WB_VM_NVRAM}</nvram>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <runtime state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <vendor_id state='on' value='randomid'/>
+      <frequencies state='on'/>
+      <tlbflush state='on'/>
+      <ipi state='on'/>
+      <avic state='on'/>
+    </hyperv>
+    <kvm>
+      <!-- 隐藏 hypervisor 标志：某些驱动/安装程序会据此判定"虚拟机"而拒绝工作 -->
+      <hidden state='on'/>
+    </kvm>
+    <vmport state='off'/>
+    <smm state='on'/>
+    <ioapic driver='kvm'/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='on'>
+    <topology sockets='1' dies='1' clusters='1' cores='${WB_VM_VCPUS}' threads='1'/>
+    <feature policy='disable' name='hypervisor'/>
+    <!-- AMD 扩展拓扑 CPUID：AGESA/内核组合下 host-passthrough 可能漏掉它 -->
+    <feature policy='require' name='topoext'/>
+  </cpu>
+  <clock offset='localtime'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='hypervclock' present='yes'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='${WB_VM_DISK}'/>
+      <target dev='sda' bus='sata'/>
+      <boot order='1'/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>
+    ${WB_XML_FRAGMENT_CDROM}
+    ${WB_XML_FRAGMENT_IGPU}
+    <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
+    <controller type='pci' index='0' model='pcie-root'/>
+    <controller type='sata' index='0'/>
+    <controller type='virtio-serial' index='0'/>
+    <interface type='network'>
+      <mac address='${WB_VM_MAC}'/>
+      <source network='${WB_VM_NETWORK}'/>
+      <model type='e1000e'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+    </channel>
+    <input type='tablet' bus='usb'/>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+    <graphics type='spice' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+      <image compression='off'/>
+    </graphics>
+    <sound model='ich9'/>
+    <audio id='1' type='spice'/>
+    <video>
+      ${WB_XML_FRAGMENT_VIDEO}
+    </video>
+    <redirdev bus='usb' type='spicevmc'/>
+    <watchdog model='itco' action='reset'/>
+    <memballoon model='virtio'/>
+  </devices>
+  <seclabel type='dynamic' model='apparmor' relabel='yes'/>
+  <seclabel type='dynamic' model='dac' relabel='yes'/>
+  ${WB_XML_FRAGMENT_SHMEM}
+  ${WB_XML_FRAGMENT_XVGA}
+</domain>

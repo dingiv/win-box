@@ -1,45 +1,80 @@
 # win-box 配置
 #
-# 由 `winbox detect --write` 自动生成；也可以手工复制本文件为 config/win-box.conf 后编辑。
+# 由 `winbox detect --write`（硬件）与 `winbox adopt`（现有 VM 身份）自动生成；
+# 也可以手工把本文件复制为 config/win-box.conf 后编辑。
 #
 # 规则：
-#   * 格式为简单 KEY=VALUE，值里不要有空格（空格请用下划线或去掉）
+#   * 格式为简单 KEY=VALUE，值里不要有空格、不要含 XML 特殊字符（& < > " '）
 #   * 空值 = 未设置，会回落到内置默认值
 #   * 优先级：命令行 > 环境变量（同名 WB_*） > 本文件 > 内置默认
-#   * 本文件（win-box.conf）已被 .gitignore 忽略——它机器相关，不进版本库
+#   * config/win-box.conf 已被 .gitignore 忽略——它机器相关，不进版本库
 
-# ── 虚拟机 ────────────────────────────────────────────────────────────────
-WB_VM_NAME=win11
-
-# ── 核显的 PCI 地址（detect 自动探测；多显卡机器请手工确认）────────────────
-# VGA 功能与其同槽的 HDMI 音频功能，例如 0000:0d:00.0 / 0000:0d:00.1
+# ── 硬件：核显（`winbox detect --write` 自动填）────────────────────────────
+# VGA 功能与其同槽的 HDMI 音频功能（十六进制 BDF）
 WB_GPU_BDF=0000:0d:00.0
 WB_AUDIO_BDF=0000:0d:00.1
-
-# vendor:device，用于 vfio-pci 的 ids= 与 ROM 校验
+# vendor:device（十进制冒号十六进制，用于 vfio-pci 的 ids= 与 ROM 校验）
 WB_GPU_ID=1002:13c0
 WB_AUDIO_ID=1002:1640
-
-# 核显所在 IOMMU 分组（共享分组时需要额外处理 ACS）
+# 核显所在 IOMMU 分组（与其它设备共享时需要 ACS 覆盖）
 WB_IOMMU_GROUP=
 
 # ── ROM 部署 ──────────────────────────────────────────────────────────────
-# 只有 libvirt-qemu 需要读它；不要放在 /mnt 等挂载点上（权限与 AppArmor 都会碍事）
+# 只有 libvirt-qemu 需要读；不要放在 /mnt 等挂载点（权限与 AppArmor 都会碍事）
 WB_VBIOS_DIR=/var/lib/libvirt/vbios
 WB_VBIOS_GPU=vbios_gpu.rom
 WB_VBIOS_AUDIO=vbios_audio.rom
 
+# ── 虚拟机身份（由 `winbox adopt` 或 `winbox vm-create` 写入）─────────────
+# 模板渲染依赖这些值：缺了它们，winbox 无法安全地重建域定义
+WB_VM_NAME=win11
+WB_VM_UUID=00000000-0000-0000-0000-000000000000
+WB_VM_MEMORY_MB=16384
+WB_VM_VCPUS=8
+WB_VM_DISK=/var/lib/libvirt/images/win11.qcow2
+# 安装 ISO（留空 = 不挂光驱）
+WB_VM_ISO=
+WB_VM_MAC=52:54:00:00:00:01
+WB_VM_NETWORK=default
+WB_VM_NVRAM=/var/lib/libvirt/qemu/nvram/win11_VARS.fd
+# 机器类型：全新安装用 q35（跟随最新）；接管现有 VM 时沿用原值，避免换芯片组
+WB_MACHINE=q35
+# Secure Boot：1 = 开（需要 secboot 版 OVMF 与已注册密钥），0 = 关
+WB_VM_SECUREBOOT=0
+WB_OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+WB_OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+
+# ── 形态开关（决定模板里用哪些片段）──────────────────────────────────────
+# 显示模式：
+#   test    = 无虚拟显卡 + x-vga=on   核显是 Primary，判据是物理显示器
+#   lg      = 无虚拟显卡 + x-vga=off  Looking Glass 的正确形态（核显非启动显示适配器）
+#   inspect = QXL + x-vga=off         取证模式：SPICE 窗口里看客机内部
+#   both    = QXL + x-vga=on          双显示（实验组合）
+WB_VIDEO_MODE=lg
+# 核显是否挂进虚拟机（1/0）
+WB_GPU_ATTACHED=0
+# 共享内存设备是否挂进虚拟机（1/0）—— Looking Glass 需要
+WB_SHMEM_ENABLED=0
+
+# ── 核显挂载的地址参数（成对出现，改就一起改）────────────────────────────
+# 验证过的组合：root port index 15 ↔ 客机侧 bus 0x0f
+WB_ROOTPORT_INDEX=15
+WB_ROOTPORT_CHASSIS=15
+WB_ROOTPORT_PORT=0x0
+WB_IGPU_GUEST_BUS=0x0f
+WB_IGPU_GUEST_SLOT=0x00
+
 # ── Looking Glass ─────────────────────────────────────────────────────────
-# 共享内存大小：1080p→32，1440p→64，4K→128
+# 共享内存大小：1080p→32，1440p→64，4K→128（必须与 kvmfr 的 static_size_mb 一致）
 WB_SHM_SIZE_MB=128
-# 第三方源码 submodule（相对仓库根）；客户端构建产物
+# 第三方源码 submodule（相对仓库根）与客户端构建产物路径
 WB_LG_SRC=third_party/LookingGlass
 WB_LG_CLIENT=/home/你的用户名/.local/bin/looking-glass-client
 
-# ── 客机交互通道（留空 = 不做客机侧检查，相关项在 status 里降级为 ⚠）──────
+# ── 客机交互通道（留空 = 相关检查在 status 里降级为 ⚠ 并跳过）─────────────
 WB_GUEST_USER=
 WB_GUEST_HOST=
 
 # ── 复位轮回 ──────────────────────────────────────────────────────────────
-# amdgpu 绑定后等待初始化的秒数（太短会导致复位不彻底）
+# amdgpu 接管后等待初始化的秒数（太短会导致复位不彻底）
 WB_REBOOT_WAIT=30
