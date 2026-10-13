@@ -299,7 +299,22 @@ softdep snd_hda_intel pre: vfio-pci"
 # 写 host 姿态（撤掉我们的配置；冲突项需要 --takeover）
 # 返回 0=有改动，1=无需改动
 wb_host_gpu_config_host() {
-  local takeover=${1:-} changed=0 conflicts
+  local takeover=${1:-} changed=0 conflicts bootunits
+  # 开机脚本同样算冲突：它会在每次开机把核显抢回 vfio-pci，让 host 姿态失效。
+  # （本工具**不新建服务**，只探测——以及在你明确要求时停用遗留的。）
+  bootunits=$(wb_host_gpu_boot_units)
+  if [[ -n $bootunits ]]; then
+    wb_warn '检测到开机脚本会在每次开机把核显绑回 vfio-pci：'
+    printf '%s\n' "$bootunits" | awk -F'|' '{printf "      %s → %s\n", $1, $3}' >&2
+    if [[ $takeover == --takeover ]]; then
+      wb_host_gpu_disable_boot_units
+      changed=1
+    else
+      wb_fail 3 host-gpu '存在开机绑定脚本，未做改动（sudo winbox host-gpu host --takeover 会停用并归档它）' \
+        "docs/interfaces/01-winbox-cli.md"
+    fi
+  fi
+
   conflicts=$(wb_host_gpu_conflicts)
   if [[ -n $conflicts ]]; then
     wb_warn '以下位置还有直通相关配置（不是 win-box 管的文件，默认不改动）：'
@@ -362,51 +377,187 @@ wb_host_gpu_clean_conflicts() {
   return 0
 }
 
-# ── 立即生效（当前会话）───────────────────────────────────────────────────
+# ── 运行时的动态 ID（踩过的坑：不清掉就会被抢回）─────────────────────────
+#
+# `options vfio-pci ids=…` 是在**模块加载时**注册成动态 ID 的，注册后一直有效，
+# 直到模块卸载或显式 remove_id。所以"删了 modprobe.d + unbind"并不等于设备自由了：
+# 任何 probe/uevent 都会让 vfio-pci 凭旧动态 ID 把设备抢回去（实测：unbind 之后
+# drivers_probe 立刻把它抢回，amdgpu 再加载也绑不上）。
 
-# 把核显交给 vfio-pci（先解绑当前驱动）
-wb_host_gpu_live_passthrough() {
-  local gpu aud d
-  wb_require_root
-  gpu=$(wb_conf_get_default WB_GPU_BDF '')
-  aud=$(wb_conf_get_default WB_AUDIO_BDF '')
-  [[ -n $gpu ]] || wb_fail 3 host-gpu '未配置 WB_GPU_BDF' 'docs/interfaces/01-winbox-cli.md'
-  for d in "$gpu" "$aud"; do
-    [[ -n $d ]] || continue
-    [[ $(wb_pci_driver "$d") == vfio-pci ]] && { wb_ok "$d 已在 vfio-pci"; continue; }
-    wb_pci_override "$d" vfio-pci || true
-    wb_pci_unbind "$d" || true
-    wb_pci_bind "$d" vfio-pci || wb_warn "$d 绑定 vfio-pci 失败"
-    wb_ok "$d → vfio-pci"
+# stdout: "vendor device" 形式的 ID 对（每行一对）
+wb_host_gpu__id_pairs() {
+  local pair
+  wb_host_gpu__ids | tr ',' '\n' | while IFS= read -r pair; do
+    [[ -n $pair ]] || continue
+    printf '%s %s\n' "${pair%%:*}" "${pair##*:}"
   done
 }
 
-# 把核显交回宿主：解绑 vfio-pci（并清 driver_override）→ 加载 amdgpu → 等它就位
-wb_host_gpu_live_host() {
-  local gpu aud d drv
+wb_host_gpu_vfio_remove_ids() {
+  local v d
+  wb_require_root
+  [[ -w /sys/bus/pci/drivers/vfio-pci/remove_id ]] || return 0
+  while read -r v d; do
+    [[ -n $v && -n $d ]] || continue
+    if wb_write /sys/bus/pci/drivers/vfio-pci/remove_id "$v $d"; then
+      wb_ok "已从 vfio-pci 移除动态 ID $v:$d"
+    else
+      wb_log "  （$v:$d 不在 vfio-pci 的动态 ID 里，跳过）"
+    fi
+  done < <(wb_host_gpu__id_pairs)
+  return 0
+}
+
+wb_host_gpu_vfio_add_ids() {
+  local v d
+  wb_require_root
+  [[ -w /sys/bus/pci/drivers/vfio-pci/new_id ]] || return 0
+  while read -r v d; do
+    [[ -n $v && -n $d ]] || continue
+    if wb_write /sys/bus/pci/drivers/vfio-pci/new_id "$v $d"; then
+      wb_ok "已给 vfio-pci 注册动态 ID $v:$d"
+    else
+      wb_log "  （$v:$d 已在 vfio-pci 动态 ID 里，跳过）"
+    fi
+  done < <(wb_host_gpu__id_pairs)
+  return 0
+}
+
+# ── 开机阶段会"把核显抢回 vfio-pci"的遗留脚本（只探测/停用，不新建）──────
+#
+# 本工具**不引入 systemd 服务**：只负责发现"别人写的开机绑定脚本"，因为它会在每次
+# 开机时覆盖我们的姿态（实测：旧 vfio-bind-gpu.service 会让 host 姿态失效）。
+# 探测方式：unit 文件的 ExecStart 指向的脚本里提到 vfio-pci，且该 unit 处于 enabled。
+
+WB_HOST_GPU_SYSTEMD=${WB_HOST_GPU_SYSTEMD:-/etc/systemd/system}
+
+# unit 是否处于启用状态：先看 .wants 软链（文件系统判据 —— 可测、且不依赖 systemd 运行），
+# 再退回问 systemctl（覆盖 enable --now 到别的 target 之类的情况）
+wb_host_gpu__unit_enabled() {
+  local unit=${1:-} d
+  for d in "$WB_HOST_GPU_SYSTEMD" /etc/systemd/system; do
+    if [[ -L "$d/multi-user.target.wants/$unit" || -L "$d/graphical.target.wants/$unit" ]]; then
+      return 0
+    fi
+  done
+  case $(systemctl is-enabled "$unit" 2>/dev/null || true) in
+    enabled | enabled-runtime) return 0 ;;
+  esac
+  return 1
+}
+
+# stdout 每行: <unit名>|<unit文件>|<ExecStart 脚本>
+wb_host_gpu_boot_units() {
+  local d u ex
+  # 目录去重：WB_HOST_GPU_SYSTEMD 默认就是 /etc/systemd/system，写死再列一遍会报两次（踩过）
+  for d in $(printf '%s\n' "$WB_HOST_GPU_SYSTEMD" /etc/systemd/system /usr/lib/systemd/system | awk '!seen[$0]++'); do
+    [[ -d $d ]] || continue
+    for u in "$d"/*.service; do
+      [[ -f $u ]] || continue
+      ex=$(awk -F= '/^[[:space:]]*ExecStart=/{print $2; exit}' "$u" 2>/dev/null | awk '{print $1}')
+      [[ -n $ex && -f $ex ]] || continue
+      grep -qE 'vfio[-_]pci' "$ex" 2>/dev/null || continue
+      wb_host_gpu__unit_enabled "$(basename -- "$u")" || continue
+      printf '%s|%s|%s\n' "$(basename -- "$u")" "$u" "$ex"
+    done
+  done
+  return 0
+}
+
+# --takeover 时停用它们（停用 + 归档 unit 文件，改前不改动脚本本身）
+wb_host_gpu_disable_boot_units() {
+  local unit file ex
+  while IFS='|' read -r unit file ex; do
+    [[ -n $unit ]] || continue
+    if wb_is_dry_run; then
+      wb_log "  [dry-run] systemctl disable --now $unit；归档 $file"
+      continue
+    fi
+    wb_run systemctl disable --now "$unit" >/dev/null 2>&1 || wb_warn "停用 $unit 失败"
+    wb_run mv -- "$file" "${file}.disabled-by-winbox"
+    wb_ok "已停用并归档: $unit（${file}.disabled-by-winbox；脚本 $ex 未删）"
+  done < <(wb_host_gpu_boot_units)
+  if ! wb_is_dry_run; then wb_run systemctl daemon-reload >/dev/null 2>&1 || true; fi
+  return 0
+}
+
+# ── 立即生效（当前会话）───────────────────────────────────────────────────
+
+# 把核显交给 vfio-pci（当前会话）。返回 0 = 已校验达成目标
+wb_host_gpu_live_passthrough() {
+  local gpu aud d drv ok=1
   wb_require_root
   gpu=$(wb_conf_get_default WB_GPU_BDF '')
   aud=$(wb_conf_get_default WB_AUDIO_BDF '')
   [[ -n $gpu ]] || wb_fail 3 host-gpu '未配置 WB_GPU_BDF' 'docs/interfaces/01-winbox-cli.md'
 
+  # 让运行中的 vfio_pci 也带上动态 ID（与持久化姿态一致；否则后续 uevent 可能把它交给别人）
+  wb_host_gpu_vfio_add_ids
+
   for d in "$gpu" "$aud"; do
     [[ -n $d ]] || continue
-    # 清掉 driver_override，否则内核仍会按 override 把它交回 vfio-pci
-    wb_pci_override_clear "$d" || true
-    if [[ $(wb_pci_driver "$d") == vfio-pci ]]; then
-      wb_pci_unbind "$d" || wb_warn "$d 解绑失败"
-    fi
-    wb_pci_probe "$d" || true
-    wb_ok "$d 已交回宿主"
+    [[ $(wb_pci_driver "$d") == vfio-pci ]] && continue
+    wb_pci_override "$d" vfio-pci || true
+    wb_pci_unbind "$d" || true
+    wb_pci_bind "$d" vfio-pci || true
   done
 
-  wb_run modprobe amdgpu || wb_warn 'modprobe amdgpu 失败（模块装了吗？看 dmesg）'
-  if [[ $(wb_pci_driver "$gpu") == amdgpu ]]; then
-    wb_ok "$gpu → amdgpu"
-  elif wb_pci_wait_driver "$gpu" amdgpu 15; then
-    wb_ok "$gpu → amdgpu（等待后绑定成功）"
-  else
-    drv=$(wb_pci_driver "$gpu")
-    wb_warn "$gpu 当前驱动是 $drv（不是 amdgpu）——可能要重启后才会真正归宿主"
-  fi
+  # 校验后才打勾（曾经在校验之前就打印"已交回宿主"，出现自相矛盾的输出）
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    if wb_pci_wait_driver "$d" vfio-pci 10; then
+      wb_ok "$d → vfio-pci（已校验）"
+    else
+      drv=$(wb_pci_driver "$d"); wb_warn "$d 目标 vfio-pci，当前 $drv"
+      ok=0
+    fi
+  done
+  (( ok )) && return 0 || return 1
+}
+
+# 把核显交回宿主（当前会话）。返回 0 = 已校验达成目标
+#   目标驱动：VGA 功能 → amdgpu；HDMI 音频功能 → snd_hda_intel（不是 amdgpu！）
+wb_host_gpu_live_host() {
+  local gpu aud d drv want ok=1
+  wb_require_root
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  aud=$(wb_conf_get_default WB_AUDIO_BDF '')
+  [[ -n $gpu ]] || wb_fail 3 host-gpu '未配置 WB_GPU_BDF' 'docs/interfaces/01-winbox-cli.md'
+
+  # ① 清掉运行中 vfio_pci 的动态 ID —— 不清就等着被抢回（实测踩过）
+  wb_host_gpu_vfio_remove_ids
+
+  # ② 清 driver_override（否则它钉死归属，amdgpu 绑不上）并解绑
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    wb_pci_override_clear "$d" || true
+    [[ $(wb_pci_driver "$d") == vfio-pci ]] && wb_pci_unbind "$d" || true
+  done
+
+  # ③ **先加载模块，再显式绑定** —— 原来顺序反了（probe 在 modprobe 之前），
+  #    那会儿目标驱动还不存在，设备只能被 vfio-pci 抢回
+  wb_run modprobe amdgpu || wb_warn 'modprobe amdgpu 失败（模块装了？看 dmesg）'
+  [[ -n $aud ]] && wb_run modprobe snd_hda_intel || true
+
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    want=amdgpu
+    [[ $d == "$aud" ]] && want=snd_hda_intel
+    [[ $(wb_pci_driver "$d") == "$want" ]] && continue
+    wb_write "/sys/bus/pci/drivers/$want/bind" "$d" || wb_warn "$d 显式绑定 $want 失败"
+  done
+
+  # ④ 校验后才打勾
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    want=amdgpu
+    [[ $d == "$aud" ]] && want=snd_hda_intel
+    if wb_pci_wait_driver "$d" "$want" 10; then
+      wb_ok "$d → $want（已校验）"
+    else
+      drv=$(wb_pci_driver "$d"); wb_warn "$d 目标 $want，当前 $drv"
+      ok=0
+    fi
+  done
+  (( ok )) && return 0 || return 1
 }

@@ -224,10 +224,13 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `wb_host_gpu_conflicts` | stdout = `文件:行号:内容`——**我们管的文件之外**的**真有效**配置（`ids=` / `softdep` 两类；黑名单不算） |
 | `wb_host_gpu_amdgpu_in_use` | 0/1：核显**自己的** DRM 卡有已连接输出，或有进程打开它的设备节点 |
 | `wb_host_gpu_vm_running` | 0/1 |
+| `wb_host_gpu_boot_units` | stdout = `unit名\|unit文件\|ExecStart脚本`——**已启用**、且脚本里提到 vfio-pci 的开机绑定脚本 |
+| `wb_host_gpu_disable_boot_units` | `--takeover` 时停用并归档它们（`systemctl disable --now` + unit 文件改名，**不删脚本**） |
+| `wb_host_gpu_vfio_remove_ids` / `wb_host_gpu_vfio_add_ids` | 运行时增删 vfio-pci 的动态 ID（见下面第 4 条事实） |
 | `wb_host_gpu_config_passthrough` | 持久化写直通姿态；返回 **0 = 有改动 / 1 = 无需改动 / ≥2 = 失败** |
 | `wb_host_gpu_config_host [--takeover]` | 持久化撤掉直通姿态（有冲突时不给 `--takeover` 就报码 3） |
 | `wb_host_gpu_clean_conflicts` | 注释冲突行（改前备份、逐条打印、带标记） |
-| `wb_host_gpu_live_passthrough` / `wb_host_gpu_live_host` | 当前会话的绑定切换（需 root） |
+| `wb_host_gpu_live_passthrough` / `wb_host_gpu_live_host` | 当前会话的绑定切换（需 root）；**返回 0 = 已校验达成目标**，1 = 未达成（由调用方决定退出码） |
 
 **三条实测事实**（决定"开关"该动哪一层，动错了就表现为"改了却没生效"）：
 
@@ -239,13 +242,22 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
    * 它对 alias 自动加载确实有效，但那一层本来多余 —— 设备早已被 vfio-pci 认领。
    实测佐证：本机在**完全没有黑名单**的情况下直通照常工作（`mode=passthrough`、核显绑 vfio-pci）。
    因此本工具不再管理它；别人文件里若有，也不当冲突报（只在 detail 里如实标注"存在但无作用"）。
-3. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
+4. **`ids=` 是在模块加载时注册成"动态 ID"的，运行期一直有效**：所以"删配置 + unbind"
+   不等于设备自由 —— 一次 probe/uevent 就会让 vfio-pci 凭旧动态 ID 抢回去
+   （实测：`unbind` 后 `drivers_probe` 立刻把它抢回，amdgpu 再加载也绑不上）。
+   要交回宿主必须先 `remove_id`，然后**先 `modprobe` 目标驱动、再显式 `bind`**，
+   不要用 `drivers_probe` 去做匹配。音频功能的目标驱动是 `snd_hda_intel`（不是 amdgpu）。
+5. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
    因此**两个方向都可能"需要重启才完全生效"**（码 5）。
    内核参数（`video=efifb:off` / `initcall_blacklist=sysfb_init`）**不用动**：
    它们只关掉简单 framebuffer（正是为了让 amdgpu 干净接管），不影响 amdgpu 工作。
 
-**可测性**：`WB_HOST_GPU_DIR` / `WB_HOST_GPU_MANAGED` / `WB_HOST_GPU_MODFILE` / `WB_HOST_GPU_LOADFILE`
-均可覆盖 → 冒烟测试用样本目录离线验证判定与冲突检测，不碰真实 `/etc`。
+**本工具不引入 systemd 服务**（用户明确要求：只探测、尽力配置、达不到就如实说明目标状态并交给用户）。
+开机阶段的绑定若由"别人的脚本"负责（unit 的 ExecStart 脚本提到 vfio-pci 且处于 enabled），
+它会被当作**冲突**报出：默认只报告，`--takeover` 才停用并归档。
+
+**可测性**：`WB_HOST_GPU_DIR` / `WB_HOST_GPU_MANAGED` / `WB_HOST_GPU_MODFILE` / `WB_HOST_GPU_LOADFILE` /
+`WB_HOST_GPU_SYSTEMD` 均可覆盖 → 冒烟测试用样本目录离线验证判定、冲突检测与开机脚本探测，不碰真实 `/etc`。
 
 > 踩过的两个坑（已修，均在测试里有断言）：
 > * 占用判定曾写成 `/sys/class/drm/card*/status` —— 既会看到**别人的**卡（NVIDIA 的显示器），

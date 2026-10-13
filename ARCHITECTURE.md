@@ -147,6 +147,8 @@ passthrough（直通姿态，默认）                     host（宿主姿态�
 两个方向都可能"需要重启才完全生效"（modprobe.d 会被打进 initramfs）→ 以码 5 收尾。
 判定只看持久化配置：有 ids= 即直通；"ids= 与开机模块表里的 amdgpu 并存"才算 mixed。
 blacklist amdgpu 不参与判定（拦不住显式 modprobe，且设备已被认领）。
+另外：**本工具不引入 systemd 服务**，只探测"别人写的开机绑定脚本"并在 host 姿态下把它当冲突报出
+（它会在每次开机把核显抢回 vfio-pci，让 host 姿态失效）；`--takeover` 才停用归档。
 ```
 
 为什么需要它：调试"到底是哪一层在挡"（把 amdgpu 还回去看核显本身是否正常）、

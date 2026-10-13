@@ -786,6 +786,61 @@ check '无配置时 vm render 报码 3（缺身份，而不是崩）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" vm render
 check '无配置时 host-gpu 真跑报码 3（缺 BDF）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
+printf '\n== 25. host-gpu：开机脚本探测 + live 修复的回归守卫 ==\n'
+# 夹具：模拟"别人写的开机绑定脚本"（enabled 与未启用各一）
+BSD="$TMP/sysd"
+mkdir -p "$BSD/multi-user.target.wants"
+printf '%s\n' '#!/bin/sh' 'echo vfio-pci > /sys/bus/pci/devices/0000:01:00.0/driver_override' > "$TMP/fake-bind.sh"
+chmod +x "$TMP/fake-bind.sh"
+printf '%s\n' '[Service]' "ExecStart=$TMP/fake-bind.sh" > "$BSD/fake-bind.service"
+printf '%s\n' '[Service]' "ExecStart=$TMP/fake-bind.sh" > "$BSD/fake-disabled.service"
+ln -sf "$BSD/fake-bind.service" "$BSD/multi-user.target.wants/fake-bind.service"
+
+bootout=$(env WB_HOST_GPU_SYSTEMD="$BSD" bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_boot_units")
+has '探测到 enabled 的开机绑定脚本' "$bootout" 'fake-bind.service'
+has '探测结果里带上它执行的脚本路径' "$bootout" 'fake-bind.sh'
+lacks '未启用的脚本不报' "$bootout" 'fake-disabled.service'
+
+# 命令层：存在开机脚本 + 不给 --takeover → 码 3（拒绝，因为姿态会被它覆盖）
+hg_cmd2() { env WB_CONF_PATH="$TMP/render.conf" WB_GPU_BDF=0000:01:00.0 WB_AUDIO_BDF=0000:01:00.1 \
+              WB_HOST_GPU_DIR="$TMP/hg-cmd" WB_HOST_GPU_MANAGED="$TMP/hg-cmd/10-test.conf" \
+              WB_HOST_GPU_MODFILE="$TMP/hg-cmd/modules" WB_HOST_GPU_LOADFILE="$TMP/hg-cmd/load.conf" \
+              WB_HOST_GPU_SYSTEMD="$BSD" \
+              "$WB_ROOT/scripts/bin/winbox" "$@"; }
+out=$(hg_cmd2 -n host-gpu host 2>&1); rc=$?
+if [[ $rc == 3 ]]; then
+  ok '有开机脚本且未给 --takeover → 码 3（拒绝执行）'
+  has '提示里点名那个 unit' "$out" 'fake-bind.service'
+else
+  bad "期望码 3（夹具里有开机脚本），实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
+fi
+check '带 --takeover 的干跑可走完（且不动真实 unit）' 0 hg_cmd2 -n host-gpu host --takeover
+check '干跑下 unit 文件仍在（没被归档）' 0 bash -c "[[ -f '$BSD/fake-bind.service' ]]"
+
+# ── 结构性回归守卫：把这次真实修掉的几个缺陷钉住 ──────────────────────────
+lib="$WB_ROOT/scripts/lib/host.sh"
+check 'live_host 会清掉 vfio-pci 的动态 ID（否则被抢回）' 0 bash -c "
+  grep -q 'remove_id' '$lib' && grep -q 'wb_host_gpu_vfio_remove_ids' '$lib'"
+# 顺序：先 modprobe amdgpu，再显式 bind —— 原来顺序反了，设备只能被 vfio-pci 抢回
+order=$(awk '/^wb_host_gpu_live_host\(\)/{f=1} f&&/modprobe amdgpu/{print "modprobe"; exit}' "$lib";         awk '/^wb_host_gpu_live_host\(\)/{f=1} f&&/drivers\/\$want\/bind/{print "bind"; exit}' "$lib")
+if [[ $(printf '%s\n' "$order" | head -1) == modprobe ]]; then
+  ok 'live_host 先加载 amdgpu、再显式绑定（顺序修正）'
+else
+  bad "live_host 顺序仍不对（先出现的是：$(printf '%s' "$order" | tr '\n' ' '))"
+fi
+check 'live_host 用显式 bind（不依赖 drivers_probe 竞态）' 0 bash -c "
+  grep -q 'drivers/\$want/bind\|drivers/amdgpu/bind\|drivers/snd_hda_intel/bind' '$lib'"
+check '音频功能的目标驱动是 snd_hda_intel（不是 amdgpu）' 0 bash -c "
+  grep -q 'snd_hda_intel' '$lib'"
+check 'live_* 校验后才返回成功（返回值语义）' 0 bash -c "
+  grep -q '(( ok )) && return 0 || return 1' '$lib'"
+
+# 设计约束：**不引入 systemd 服务**（用户明确要求：只探测，不新建）
+check '仓库里没有 .service（不引入服务）' 0 bash -c "
+  cd '$WB_ROOT' && ! git ls-files | grep -qE '\.service$'"
+check 'host-gpu 不会 enable/start 任何 unit' 0 bash -c "
+  ! grep -qE 'systemctl (enable|start|mask)' '$WB_ROOT/scripts/bin/host-gpu'"
+
 printf '\n== 23. 仓库根入口 winbox ==\n'
 check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"
 check '根入口已被 git 跟踪' 0 bash -c "cd '$WB_ROOT' && git ls-files --error-unmatch winbox >/dev/null"

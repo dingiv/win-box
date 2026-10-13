@@ -71,6 +71,14 @@ show_status() {
   if [[ -n $desired && $desired != "$mode" ]]; then
     wb_warn "与配置里的期望姿态不一致：desired=$desired 实际=$mode"
   fi
+  bootunits=$(wb_host_gpu_boot_units)
+  if [[ -n $bootunits ]]; then
+    printf '%s\n' "$bootunits" | awk -F'|' '{printf "  %-20s %s → %s\n", "boot_script", $1, $3}' >&2
+    case $mode in
+      host) wb_warn '该脚本会在每次开机把核显绑回 vfio-pci —— host 姿态会被它覆盖' ;;
+      *)    wb_log '  （该脚本与当前直通姿态一致；但它是"别人的机制"，本工具不依赖它）' ;;
+    esac
+  fi
   if [[ $(wb_pci_driver "$(wb_conf_get_default WB_GPU_BDF '')" 2>/dev/null || echo '') == amdgpu ]] \
      && [[ $mode == passthrough ]]; then
     wb_hint '配置是直通姿态但核显当前归 amdgpu —— 重启后（或 winbox reset-hook test）才会绑到 vfio-pci'
@@ -89,15 +97,17 @@ if ! wb_is_dry_run; then wb_require_root; fi
 [[ -n $(wb_conf_get_default WB_GPU_BDF '') ]] || wb_fail 3 host-gpu \
   '未配置 WB_GPU_BDF（先跑 winbox detect --write）' "docs/interfaces/01-winbox-cli.md"
 
+GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
+AUD_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
+
 if [[ $ACTION == passthrough ]]; then
-  # ── 切到直通姿态 ────────────────────────────────────────────────────────
+  # ── 切到直通姿态：期望 GPU/音频 都归 vfio-pci ───────────────────────────
   wb_step '1/3' '占用检查'
   if wb_host_gpu_vm_running; then
     wb_fail 3 host-gpu \
       '虚拟机正在运行：先把客机 ACPI 关机（winbox vm shutdown），否则等于把 GPU 从 QEMU 手里抽走' \
       "docs/interfaces/02-vmctl.md"
   fi
-  GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
   if [[ $(wb_pci_driver "$GPU_BDF") == vfio-pci ]]; then
     wb_ok '核显已在 vfio-pci 上'
   elif wb_host_gpu_amdgpu_in_use; then
@@ -120,14 +130,16 @@ if [[ $ACTION == passthrough ]]; then
   esac
 
   wb_step '3/3' '立即生效（当前会话绑定）'
+  live_ok=1
   if wb_is_dry_run; then
-    wb_log "  [dry-run] 将把 $GPU_BDF 与音频功能绑到 vfio-pci（清 driver_override → 解绑 → 绑定）"
+    wb_log "  [dry-run] 将把 $GPU_BDF（与音频功能）绑到 vfio-pci，并给运行中的 vfio-pci 注册动态 ID"
   else
-    wb_host_gpu_live_passthrough
+    wb_host_gpu_live_passthrough || live_ok=0
   fi
   wb_conf_set WB_HOST_GPU_MODE passthrough
+  target='核显与音频功能都绑在 vfio-pci（宿主不占用）'
 else
-  # ── 切到宿主姿态 ────────────────────────────────────────────────────────
+  # ── 切到宿主姿态：期望 GPU→amdgpu、音频→snd_hda_intel ──────────────────
   wb_step '1/3' '占用检查'
   if wb_host_gpu_vm_running; then
     wb_fail 3 host-gpu \
@@ -135,7 +147,7 @@ else
       "docs/interfaces/02-vmctl.md"
   fi
   wb_ok '虚拟机未运行'
-  [[ -n $TOKEOVER ]] && wb_ok '按 --takeover 处理其它文件里的直通配置'
+  [[ -n $TOKEOVER ]] && wb_ok '按 --takeover 处理冲突（含遗留的开机绑定脚本）'
 
   wb_step '2/3' '持久化配置（撤掉直通配置）'
   changed=0
@@ -148,27 +160,34 @@ else
   esac
 
   wb_step '3/3' '立即生效（交回宿主）'
+  live_ok=1
   if wb_is_dry_run; then
-    wb_log '  [dry-run] 将清 driver_override → 解绑 vfio-pci → modprobe amdgpu'
+    wb_log '  [dry-run] 将清掉 vfio-pci 的动态 ID 与 driver_override → modprobe amdgpu/snd_hda_intel → 显式绑定'
   else
-    wb_host_gpu_live_host
+    wb_host_gpu_live_host || live_ok=0
   fi
   wb_conf_set WB_HOST_GPU_MODE host
+  target='核显归宿主使用：GPU → amdgpu，音频 → snd_hda_intel'
 fi
 
 echo >&2
 wb_log '== 结果 =='
-wb_log "  持久化姿态: $(wb_host_gpu_detect)"
-wb_log "  核显驱动  : $(wb_pci_driver "$(wb_conf_get_default WB_GPU_BDF '')")"
-if (( changed )); then
-  wb_warn '持久化配置有改动：modprobe.d / initramfs 变更**必须重启**才完全生效'
-  wb_hint '重启后自检: winbox host-gpu status'
-  if wb_is_dry_run; then
-    wb_log ''
-    wb_log '（--dry-run：以上改动均未落盘；真跑的话这一步会要求你重启宿主）'
-    exit 0
-  fi
-  wb_fail 5 host-gpu '需要重启宿主才完全生效' "docs/interfaces/01-winbox-cli.md"
+wb_log "  目标状态: $ACTION（$target）"
+wb_log "  持久化  : $(wb_host_gpu_detect)   期望: $ACTION"
+wb_log "  当前驱动: GPU=$(wb_pci_driver "$GPU_BDF")  音频=$( [[ -n $AUD_BDF ]] && wb_pci_driver "$AUD_BDF" || echo '（无）')"
+if wb_is_dry_run; then
+  # 干跑没有真正切驱动：这里不能声称"已生效"（踩过——干跑会谎报成功）
+  wb_log ''
+  wb_log '（--dry-run：以上改动均未落盘，驱动也没有真正切换）'
+  exit 0
 fi
-wb_ok '完成（无持久化改动，无需重启）'
-wb_hint '确认: winbox host-gpu status   /   全链路: winbox status --host'
+if (( live_ok )); then
+  wb_ok '目标状态已生效（当前会话）；下次开机同样如此（持久化配置已就位）'
+  (( changed )) && wb_hint '持久化配置有改动，但当前会话也已切好——不需要为此重启'
+  exit 0
+fi
+wb_warn '目标状态**未达成**（当前会话没切过去）'
+wb_hint '先看: winbox host-gpu status（会列出是否还有开机脚本/其它文件在抢核显）'
+wb_hint '还存在开机绑定脚本时: sudo winbox host-gpu host --takeover 会停用并归档它'
+wb_hint '最后手段: 重启宿主（持久化配置已就位，开机后会落在目标姿态）'
+wb_fail 5 host-gpu "未达成目标状态：$target" "docs/interfaces/01-winbox-cli.md"

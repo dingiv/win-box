@@ -163,9 +163,14 @@ winbox [全局选项] <command> [command 选项]
   与 `softdep amdgpu pre: …`（黑名单不在此列）
 - **输出**：`status` 打印 `mode / desired / vfio_ids / softdep / blacklisted（仅记录）/ bootlist_amdgpu / bootlist_vfio / driver / amdgpu_loaded / framebuffer_in_use`；
   切换做两件事：**持久化配置**（modprobe.d + initramfs）与**立即生效**（当前会话的绑定）
-- **失败**：码 2 = 动作非法；码 3 = 非 root（真跑）/ VM 正在运行 / 有冲突而未给 `--takeover` / 未配置 BDF；
-  **码 5 = 持久化有改动（需要重启）**，或用户在"核显正被宿主使用"的确认处取消
-- **生命周期**：幂等——没有持久化改动时退出 0 且**不要求重启**；两个方向的"当前会话"部分也幂等（已在该驱动上就跳过）
+- **失败**：码 2 = 动作非法；码 3 = 非 root（真跑）/ VM 正在运行 / 有冲突（其它文件的 `ids=`·`softdep`，
+  或**已启用的开机绑定脚本**）而未给 `--takeover` / 未配置 BDF；码 5 = **目标状态未达成**
+  （当前会话没切过去；输出会同时给出"目标状态 / 当前状态"与下一步），或用户在确认处取消
+- **即时生效**：两个方向都尽力在当前会话内切到位（清/注册动态 ID → `modprobe` 目标驱动 →
+  **显式 bind** → 校验）；**验证通过即退出 0**，不因为"碰了持久化配置"就要求重启
+- **不引入 systemd 服务**：只**探测**"别人的开机绑定脚本"（unit 的 ExecStart 脚本提到 vfio-pci 且已启用），
+  默认只报告；`--takeover` 才 `systemctl disable --now` 并归档 unit 文件（脚本本体不删）
+- **生命周期**：幂等——已在该驱动上就跳过；没有持久化改动时明确说"无需重启" 
 - **为什么"只删黑名单"不够**、**为什么内核参数不用动**：见 `04-lib-api.md` 的 `lib/host.sh` 一节
 
 ### 运维转发
