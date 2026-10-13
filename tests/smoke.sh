@@ -147,6 +147,14 @@ check '所有命令都已实现（无半成品入口）' 0 bash -c "
            lg-prepare lg-shmem reset-hook lg rom vmctl; do
     [[ -x '$WB_ROOT/scripts/bin/'\$c ]] || { echo \"缺: \$c\"; exit 1; }
   done"
+hout=$("$WB_ROOT/scripts/bin/winbox" --help 2>&1)
+# 命令表里每一行要么带 ★，要么是"未实现"——现在不该有后者
+if grep -qE '^    [a-z][a-z-]+ +' <<< "$hout"; then
+  bad '帮助表里仍有未标记 ★ 的命令（半成品入口）'
+  grep -E '^    [a-z][a-z-]+ +' <<< "$hout" | sed 's/^/      /'
+else
+  ok '帮助表里所有命令都已实现（无半成品入口）'
+fi
 check 'winbox conf key=value 往返' 0 bash -c "
   '$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME=beta
   [[ \$('$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME) == beta ]]"

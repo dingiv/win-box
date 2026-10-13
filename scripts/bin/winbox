@@ -54,7 +54,12 @@ win-box $WB_VERSION — 在 Linux 上用 KVM 跑 Windows 11，并把 AMD 核显�
 EOF
   local c mark
   for c in "${WB_COMMANDS[@]}"; do
-    if [[ -x $WB_ROOT/scripts/bin/$c ]]; then mark='★'; else mark=' '; fi
+    # vm 没有同名脚本（它转发给 vmctl），别因此显示成"未实现"
+    if [[ -x $WB_ROOT/scripts/bin/$c ]] || { [[ $c == vm ]] && [[ -x $WB_ROOT/scripts/bin/vmctl ]]; }; then
+      mark='★'
+    else
+      mark=' '
+    fi
     printf '  %s %-12s %s\n' "$mark" "$c" "$(wb__cmd_desc "$c")" >&2
   done
   cat >&2 <<EOF
