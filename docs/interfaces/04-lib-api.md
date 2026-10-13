@@ -211,7 +211,9 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `host` | 没有 `ids=` |
 | `mixed` | 有 `ids=` **但**开机模块表里还有 amdgpu（一边要抢占、一边要早期加载，结果取决于顺序 —— 脆弱，要出声） |
 
-> `blacklist amdgpu` **不参与判定**，本工具也不再写它、不再删它、不再把它当冲突报。
+> `blacklist amdgpu` **不参与判定**（判定看 `ids=`），但它是**直通姿态内容的一部分**：
+> 它唯一真实的作用是挡住 udev 按 modalias 的**自动加载** —— 也就是"别让 amdgpu 在宿主里常驻"。
+> 本工具会写我们那份文件里的这一行，但不会去改别人文件里的（也不当冲突报）。
 > 见下面第 2 条事实。
 
 | 函数 | 语义 |
@@ -233,17 +235,19 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `wb_host_gpu_config_host [--takeover]` | 持久化撤掉直通姿态（有冲突时不给 `--takeover` 就报码 3） |
 | `wb_host_gpu_clean_conflicts` | 注释冲突行（改前备份、逐条打印、带标记） |
 | `wb_host_gpu_live_passthrough` / `wb_host_gpu_live_host` | 当前会话的绑定切换（需 root）；**返回 0 = 已校验达成目标**，1 = 未达成（由调用方决定退出码） |
+| `wb_host_gpu_unload_amdgpu [原因]` | 把 amdgpu 从宿主卸掉（best effort：`modprobe -r amdgpu`，失败只警告）。直通姿态**收尾**会调用它；复位轮回做完也会调用 |
 
 **三条实测事实**（决定"开关"该动哪一层，动错了就表现为"改了却没生效"）：
 
 1. **真正起作用的是"谁在开机阶段先把设备认领走"**：`options vfio-pci ids=…`（认领）
    ＋ `vfio_pci` 在开机模块表里（早于 amdgpu 执行）。两者配合在 initramfs 阶段就完成抢占，
    之后 amdgpu 根本没机会绑定 —— 这就是整个直通姿态的机制。
-2. **`blacklist amdgpu` 是装饰**（实测）：
+2. **`blacklist amdgpu` 只管"开机自动加载"这一段**（实测）：
    * 拦不住显式 modprobe —— `modprobe -n -v amdgpu` 照样把依赖链全解析出来（核显复位正靠这点）；
-   * 它对 alias 自动加载确实有效，但那一层本来多余 —— 设备早已被 vfio-pci 认领。
-   实测佐证：本机在**完全没有黑名单**的情况下直通照常工作（`mode=passthrough`、核显绑 vfio-pci）。
-   因此本工具不再管理它；别人文件里若有，也不当冲突报（只在 detail 里如实标注"存在但无作用"）。
+   * 但对 udev 的 modalias 自动加载**确实有效**（加与不加，alias 解析结果不同）。
+   所以它的定位是"**别让 amdgpu 在宿主里常驻**"（用户明确要求），而"能不能直通"由 `ids=` 决定
+   —— 本机实测过：完全没有黑名单时直通照常工作（`mode=passthrough`、核显绑 vfio-pci）。
+   两件事各管一段，因此：直通姿态**写**这一行；别人的文件不动、不当冲突报。
 4. **`ids=` 是在模块加载时注册成"动态 ID"的，运行期一直有效**：所以"删配置 + unbind"
    不等于设备自由 —— 一次 probe/uevent 就会让 vfio-pci 凭旧动态 ID 抢回去
    （实测：`unbind` 后 `drivers_probe` 立刻把它抢回，amdgpu 再加载也绑不上）。

@@ -265,11 +265,15 @@ wb_host_gpu_config_passthrough() {
   ids=$(wb_host_gpu__ids) || rc=$?
   if (( rc != 0 )); then return "$rc"; fi
 
-  # 认领设备的那一行（真正起作用的配置）+ 加载顺序。不再写 blacklist —— 它无作用，
-  # 写进来只会让人误以为它是关键（实测：`modprobe amdgpu` 照样能加载）。
+  # 认领设备的那一行（真正决定"能不能直通"的配置）+ 加载顺序
+  # + **黑名单**：它拦不住显式 modprobe（复位要用），但它能挡住 udev 的 modalias 自动加载
+  #   —— 也就是"让 amdgpu 别在宿主里被加载出来"。这两件事不矛盾，各管一段。
   want="options vfio-pci ids=$ids
 softdep amdgpu pre: vfio-pci
-softdep snd_hda_intel pre: vfio-pci"
+softdep snd_hda_intel pre: vfio-pci
+# win-box：下面这行只影响 udev 的 alias 自动加载（宿主不该常驻 amdgpu）；
+# 复位轮回会用显式 modprobe amdgpu，不受它影响
+blacklist amdgpu"
 
   current=$(cat "$WB_HOST_GPU_MANAGED" 2>/dev/null || true)
   if [[ $current == "$want" ]]; then
@@ -531,6 +535,28 @@ wb_host_gpu_disable_boot_units() {
   return 0
 }
 
+# 把 amdgpu 从宿主卸掉（best effort）。
+# 为什么：宿主不该常驻它（udev 会按 modalias 自动加载，黑名单负责挡这个）；
+# 而复位轮回需要它**临时**在位，复位做完就卸掉，让宿主回到"完全没碰核显"的状态。
+wb_host_gpu_unload_amdgpu() {
+  local why=${1:-}
+  grep -q '^amdgpu ' /proc/modules 2>/dev/null || return 0
+  if wb_is_dry_run; then
+    wb_log "  [dry-run] modprobe -r amdgpu${why:+（$why）}"
+    return 0
+  fi
+  if wb_run modprobe -r amdgpu 2>/dev/null; then
+    if grep -q '^amdgpu ' /proc/modules 2>/dev/null; then
+      wb_warn 'amdgpu 仍在加载（可能被其它模块引用）'
+      return 1
+    fi
+    wb_ok "已从宿主卸载 amdgpu${why:+（$why）}"
+    return 0
+  fi
+  wb_warn '卸载 amdgpu 失败（可能有依赖被占用）—— 见 lsmod'
+  return 1
+}
+
 # 带重试的绑定。
 # 依据（实测）：刚 unbind —— 尤其 unbind amdgpu 会触发 MODE2 reset —— 之后立刻 bind
 # 可能失败（设备处于瞬时状态）；同一台机器上第一次失败、几分钟后重试即成功。
@@ -583,6 +609,9 @@ wb_host_gpu_live_passthrough() {
       ok=0
     fi
   done
+  # ⑤ 宿主不该常驻 amdgpu：黑名单负责"开机不加载"，这里负责"把已加载的卸掉"
+  wb_host_gpu_unload_amdgpu '直通姿态：宿主不碰核显' || ok=0
+
   (( ok )) && return 0 || return 1
 }
 
@@ -619,7 +648,7 @@ wb_host_gpu_live_host() {
     wb_host_gpu__bind_retry "$d" "$want" || wb_pci_try_probe "$d"
   done
 
-  # ④ 校验后才打勾
+  # ④ 校验两路是否都到了 vfio-pci
   for d in "$gpu" "$aud"; do
     [[ -n $d ]] || continue
     want=amdgpu

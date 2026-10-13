@@ -802,6 +802,9 @@ sed -e "s|@WBR@|$WB_ROOT|" -e "s|@DIR@|$HG|" "$TMP/hg-dryrun.sh" > "$TMP/hg-dryr
 out=$(WB_CONF_PATH="$TMP/render.conf" bash "$TMP/hg-dryrun2.sh" 2>&1)
 has '干跑写直通配置会打印计划' "$out" '[dry-run]'
 has '干跑计划里含 ids=' "$out" 'ids=1002:13c0'
+# 用户的硬要求：宿主里不该有 amdgpu → 直通姿态要把黑名单写进我们管的文件
+# （黑名单唯一真实作用：挡住 udev 按 modalias 的自动加载）
+has '直通姿态要写 blacklist amdgpu（挡住开机自动加载）' "$out" 'blacklist amdgpu'
 check '干跑没有真的创建文件' 0 bash -c "[[ -z \$(find '$HG' -type f -print -quit) ]]"
 
 # 命令层
@@ -1021,6 +1024,19 @@ check '绑定带重试（瞬时失败可自愈）' 0 bash -c "
 check '声称"状态已改变"的打勾走 wb_ok_real（干跑不谎报）' 0 bash -c "
   cd '$WB_ROOT'
   ! grep -nE 'wb_run .*(start|snapshot|eject|rollback|usermod)' scripts/bin/* | grep -q 'wb_ok '"
+
+printf '\n== 29. 宿主不该常驻 amdgpu（用户硬要求）==\n'
+libh="$WB_ROOT/scripts/lib/host.sh"
+libg="$WB_ROOT/scripts/lib/gpu.sh"
+check '提供"卸载 amdgpu"的能力' 0 bash -c "grep -q 'wb_host_gpu_unload_amdgpu' '$libh'"
+check '直通姿态里会调用卸载' 0 bash -c "
+  sed -n '/^wb_host_gpu_live_passthrough()/,/^}/p' '$libh' | grep -q 'wb_host_gpu_unload_amdgpu'"
+check '复位轮回结束后也会卸载（宿主回到未加载）' 0 bash -c "
+  grep -q 'modprobe -r amdgpu' '$libg'"
+check '直通姿态写黑名单（开机就不自动加载）' 0 bash -c "
+  grep -q 'blacklist amdgpu' '$libh'"
+check '卸载是"尽力而为"（失败只警告，不中断）' 0 bash -c "
+  sed -n '/^wb_host_gpu_unload_amdgpu()/,/^}/p' '$libh' | grep -q 'wb_warn'"
 
 printf '\n== 23. 仓库根入口 winbox ==\n'
 check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"

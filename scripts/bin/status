@@ -168,6 +168,12 @@ if [[ $SCOPE == all || $SCOPE == host ]]; then
       '刚切完没重启？winbox host-gpu status 看细节'
   fi
 
+  # 宿主不该常驻 amdgpu（黑名单挡开机自动加载；复位后会卸载）
+  if [[ $pmode != host ]] && grep -q '^amdgpu ' /proc/modules 2>/dev/null; then
+    wb_report_item warn 'amdgpu 模块在宿主里处于加载状态' \
+      '直通不依赖它；不想让它常驻就 sudo ./winbox host-gpu passthrough（会写黑名单并卸载）'
+  fi
+
   pstate=$(wb_lg_permissions_state)
   case $pstate in
     'apparmor=ok cgroup=ok')

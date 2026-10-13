@@ -99,6 +99,15 @@ wb_gpu_reset_cycle() {
     wb_pci_bind "$d" vfio-pci || wb__gpu_log "[reset] ⚠ $d 绑定 vfio-pci 失败"
     final+="$d=$(wb_pci_driver "$d") "
   done
+  # 复位做完就把 amdgpu 卸掉：宿主不该常驻它（下一次 vm start 会再 modprobe 回来）
+  if (( reset_done )) && (( EUID == 0 )); then
+    wb_run modprobe -r amdgpu 2>/dev/null || true
+    if grep -q '^amdgpu ' /proc/modules 2>/dev/null; then
+      wb__gpu_log "[reset] amdgpu 仍在加载（被其它模块引用？）"
+    else
+      wb__gpu_log "[reset] 已卸载 amdgpu（宿主回到未加载状态）"
+    fi
+  fi
   wb__gpu_log "[reset] 结束（$(( SECONDS - t0 ))s）: ${final% }"
   (( reset_done )) || wb__gpu_log "[reset] 结论: 本次**未完成复位**"
   return "$(( reset_done ? 0 : 1 ))"

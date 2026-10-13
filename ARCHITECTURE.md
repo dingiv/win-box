@@ -139,7 +139,8 @@ winbox vm start                        ← 复位是启动流程里的一个步�
 ```
 passthrough（直通姿态，默认）                     host（宿主姿态）
   modprobe.d: options vfio-pci ids= + softdep      以上全部撤掉
-              ← 这行才是"认领设备"，是整个机制的核心
+              + blacklist amdgpu（挡 udev 自动加载）
+              ← ids= 才是"认领设备"，是整个机制的核心
   initramfs : amdgpu 不在模块表、vfio 三件套在      重建 initramfs
   当前会话  : 核显绑在 vfio-pci                     核显绑在 amdgpu
        │                                                │
@@ -148,7 +149,8 @@ passthrough（直通姿态，默认）                     host（宿主姿态�
 
 两个方向都可能"需要重启才完全生效"（modprobe.d 会被打进 initramfs）→ 以码 5 收尾。
 判定只看持久化配置：有 ids= 即直通；"ids= 与开机模块表里的 amdgpu 并存"才算 mixed。
-blacklist amdgpu 不参与判定（拦不住显式 modprobe，且设备已被认领）。
+blacklist amdgpu 不参与判定，但它管"开机别自动加载 amdgpu"这一段；直通姿态写它，
+并在收尾（`host-gpu passthrough` 与复位轮回结束）把已加载的 amdgpu 卸掉 —— 宿主不该常驻它。
 另外：**本工具不引入 systemd 服务**，只探测"别人写的开机绑定脚本"并在 host 姿态下把它当冲突报出
 （它会在每次开机把核显抢回 vfio-pci，让 host 姿态失效）；`--takeover` 才停用归档。
 ```

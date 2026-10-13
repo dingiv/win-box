@@ -149,13 +149,14 @@ winbox [全局选项] <command> [command 选项]
 
 | 姿态 | `/etc/modprobe.d` | initramfs | 核显驱动 |
 | --- | --- | --- | --- |
-| `passthrough` | `options vfio-pci ids=…` + `softdep amdgpu pre: vfio-pci`（**认领设备的就是这一行**） | amdgpu 不在、vfio 三件套在 | `vfio-pci` |
+| `passthrough` | `options vfio-pci ids=…`（**认领设备的就是这一行**）+ `softdep` + `blacklist amdgpu`（挡 udev 自动加载） | amdgpu 不在、vfio 三件套在 | `vfio-pci`，且 **amdgpu 模块被卸载** |
 | `host` | 以上撤掉 | 重建（否则早期启动仍按旧 modprobe.d 走） | `amdgpu` |
 | `mixed` | 有 `ids=`，但开机模块表里还有 amdgpu | 矛盾：一边抢占一边要早期加载 | 视加载顺序 —— `status` 报 bad |
 
-`blacklist amdgpu` **不参与判定**：实测它拦不住显式 `modprobe`，且设备早被 vfio-pci 认领，
-所以有它没它都能直通（本机就是在完全没有黑名单的情况下跑通的）。本命令不再写它、
-不再删它、也不把它当冲突报；`status` 只在 detail 里标注"存在但无作用"。
+`blacklist amdgpu` **不参与姿态判定**（判定看 `ids=`），但它是直通姿态的一部分：
+它挡不住显式 `modprobe`（复位轮回正靠这点），但对 **udev 按 modalias 的自动加载**有效 ——
+也就是"别让 amdgpu 在宿主里常驻"。因此直通姿态会写这一行、并在收尾时把已加载的 amdgpu **卸掉**；
+别人文件里的黑名单不动、也不当冲突报。
 
 - **输入**：动作（默认 `status`）；`--takeover` = 把**别人文件里**的直通配置注释掉（改前备份 + 逐条打印，带
   `# win-box host-gpu --takeover:` 标记）。**只覆盖两类真有效的配置**：`options vfio-pci … ids=`

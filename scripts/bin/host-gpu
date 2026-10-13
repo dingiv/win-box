@@ -189,6 +189,12 @@ wb_log '== 结果 =='
 wb_log "  目标状态: $ACTION（$target）"
 wb_log "  持久化  : $(wb_host_gpu_detect)   期望: $ACTION"
 wb_log "  当前驱动: GPU=$(wb_pci_driver "$GPU_BDF")  音频=$( [[ -n $AUD_BDF ]] && wb_pci_driver "$AUD_BDF" || echo '（无）')"
+if grep -q '^amdgpu ' /proc/modules 2>/dev/null; then
+  wb_log '  amdgpu 模块: 仍在加载'
+  [[ $ACTION == passthrough ]] && wb_warn '直通姿态下宿主不该常驻它（复位结束会卸掉；winbox host-gpu passthrough 也会卸）'
+else
+  wb_log '  amdgpu 模块: 未加载 ✓'
+fi
 if wb_is_dry_run; then
   # 干跑没有真正切驱动：这里不能声称"已生效"（踩过——干跑会谎报成功）
   wb_log ''
