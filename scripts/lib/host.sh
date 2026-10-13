@@ -531,6 +531,21 @@ wb_host_gpu_disable_boot_units() {
   return 0
 }
 
+# 带重试的绑定。
+# 依据（实测）：刚 unbind —— 尤其 unbind amdgpu 会触发 MODE2 reset —— 之后立刻 bind
+# 可能失败（设备处于瞬时状态）；同一台机器上第一次失败、几分钟后重试即成功。
+# 因此这里重试若干次，仍失败才交给回退路径（drivers_probe）与最终的校验报告。
+wb_host_gpu__bind_retry() {
+  local bdf=$1 drv=$2 tries=${3:-3} wait=${4:-2} i
+  for (( i = 1; i <= tries; i++ )); do
+    if wb_pci_try_bind "$bdf" "$drv"; then return 0; fi
+    (( i < tries )) || break
+    wb_log "  重试绑定 $bdf → $drv（第 $((i + 1))/$tries 次，等 ${wait}s）"
+    wb_run sleep "$wait"
+  done
+  return 1
+}
+
 # ── 立即生效（当前会话）───────────────────────────────────────────────────
 
 # 把核显交给 vfio-pci（当前会话）。返回 0 = 已校验达成目标
@@ -551,7 +566,7 @@ wb_host_gpu_live_passthrough() {
     [[ $(wb_pci_driver "$d") == vfio-pci ]] && continue
     wb_pci_try_override "$d" vfio-pci
     wb_pci_try_unbind "$d"
-    if ! wb_pci_try_bind "$d" vfio-pci; then
+    if ! wb_host_gpu__bind_retry "$d" vfio-pci; then
       # 回退：让内核按 ID 重新匹配（动态 ID 已注册时这条能成）
       wb_log "  回退：让内核按 ID 重新匹配 $d"
       wb_pci_try_probe "$d"
@@ -601,7 +616,7 @@ wb_host_gpu_live_host() {
     want=amdgpu
     [[ $d == "$aud" ]] && want=snd_hda_intel
     [[ $(wb_pci_driver "$d") == "$want" ]] && continue
-    wb_pci_try_bind "$d" "$want" || wb_pci_try_probe "$d"
+    wb_host_gpu__bind_retry "$d" "$want" || wb_pci_try_probe "$d"
   done
 
   # ④ 校验后才打勾

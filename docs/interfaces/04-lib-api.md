@@ -249,6 +249,8 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
    （实测：`unbind` 后 `drivers_probe` 立刻把它抢回，amdgpu 再加载也绑不上）。
    要交回宿主必须先 `remove_id`，然后**先 `modprobe` 目标驱动、再显式 `bind`**，
    不要用 `drivers_probe` 去做匹配。音频功能的目标驱动是 `snd_hda_intel`（不是 amdgpu）。
+   `wb_host_gpu__bind_retry`：**刚 unbind（尤其伴随 MODE2 reset）后立刻 bind 可能瞬时失败** ——
+   实测同一台机器上第一次失败、几分钟后重试即成功，所以绑定必须带重试，失败再回退 `drivers_probe`。
 5. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
    因此**两个方向都可能"需要重启才完全生效"**（码 5）。
    内核参数（`video=efifb:off` / `initcall_blacklist=sysfb_init`）**不用动**：

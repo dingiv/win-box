@@ -875,10 +875,10 @@ if [[ $(printf '%s\n' "$order" | head -1) == modprobe ]]; then
 else
   bad "live_host 顺序仍不对（先出现的是：$(printf '%s' "$order" | tr '\n' ' '))"
 fi
-check 'live_host 用显式 bind（软变体）' 0 bash -c "
-  sed -n '/^wb_host_gpu_live_host()/,/^}/p' '$lib' | grep -q 'wb_pci_try_bind'"
+check 'live_host 用显式 bind（软变体/带重试）' 0 bash -c "
+  sed -n '/^wb_host_gpu_live_host()/,/^}/p' '$lib' | grep -qE 'wb_pci_try_bind|wb_host_gpu__bind_retry'"
 # 回退顺序：drivers_probe 只能在 bind 失败之后（先 probe 就是原来的错）
-fallback_order=$(awk '/^wb_host_gpu_live_passthrough\(\)/{f=1} f&&/wb_pci_try_bind/{print "bind";exit}' "$lib"; \
+fallback_order=$(awk '/^wb_host_gpu_live_passthrough\(\)/{f=1} f&&/wb_host_gpu__bind_retry/{print "bind";exit}' "$lib"; \
                  awk '/^wb_host_gpu_live_passthrough\(\)/{f=1} f&&/wb_pci_try_probe/{print "probe";exit}' "$lib")
 if [[ $(printf '%s\n' "$fallback_order" | head -1) == bind ]]; then
   ok 'drivers_probe 只作为 bind 失败后的回退（顺序正确）'
@@ -901,13 +901,14 @@ printf '\n== 28. pci 软变体：失败不中断、且能报出原因 ==\n'
 # `|| true` 拦不住，于是"尽力而为"的循环在第一个失败处整体中断（GPU 绑定失败后
 # 音频没处理、期望姿态没写、设备被留在无驱动状态）。
 libr="$WB_ROOT/scripts/lib/pci.sh"
+# 用不存在的设备：失败是确定的，且与"本机当前把核显绑给了谁"无关
 check 'wb_pci_try_bind 失败时返回 1 而不是退出' 1 bash -c "
   export WB_ROOT='$WB_ROOT'; source '$libr'
-  wb_pci_try_bind 0000:0d:00.0 vfio-pci 2>/dev/null"
+  wb_pci_try_bind 0000:ff:ff.9 vfio-pci 2>/dev/null"
 check 'wb_pci_try_bind 会把失败原因打出来（不吞错）' 0 bash -c "
   export WB_ROOT='$WB_ROOT'; source '$libr'
-  out=\$( { wb_pci_try_bind 0000:0d:00.0 vfio-pci; } 2>&1 )
-  grep -qE '失败|Permission denied' <<< \"\$out\""
+  out=\$( { wb_pci_try_bind 0000:ff:ff.9 vfio-pci; } 2>&1 )
+  grep -qE '失败' <<< \"\$out\""
 check 'wb_pci_try_bind 对不存在设备返回 1（不炸）' 1 bash -c "
   export WB_ROOT='$WB_ROOT'; source '$libr'
   wb_pci_try_bind 0000:ff:ff.9 vfio-pci 2>/dev/null"
@@ -930,6 +931,10 @@ check 'live_* 用了软变体' 0 bash -c "
   grep -q 'wb_pci_try_bind\|wb_pci_try_override' '$WB_ROOT/scripts/lib/host.sh'"
 check '绑定失败时有回退（drivers_probe）' 0 bash -c "
   grep -q 'wb_pci_try_probe' '$WB_ROOT/scripts/lib/host.sh'"
+# 依据实测：unbind（尤其伴随 MODE2 reset）后立刻 bind 可能瞬时失败 —— 必须带重试
+check '绑定带重试（瞬时失败可自愈）' 0 bash -c "
+  grep -q 'wb_host_gpu__bind_retry' '$WB_ROOT/scripts/lib/host.sh' && \
+  [[ \$(grep -c 'wb_host_gpu__bind_retry' '$WB_ROOT/scripts/lib/host.sh') -ge 3 ]]"
 
 printf '\n== 23. 仓库根入口 winbox ==\n'
 check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"
