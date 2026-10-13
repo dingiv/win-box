@@ -100,6 +100,60 @@ wb_pci_bind() {
     || wb_fail 1 pci "绑定失败: $bdf → $drv（驱动未加载？）" "docs/interfaces/04-lib-api.md"
 }
 
+# ── "软"变体：返回 1 而不是 wb_fail 退出 ─────────────────────────────────
+#
+# 为什么需要：`wb_pci_bind x y || true` **拦不住** wb_fail —— 它是 exit，
+# 于是"尽力而为"的循环会在第一个失败处整体中断（实测踩过：GPU 绑定失败后
+# 音频没处理、期望姿态没写、设备被丢在无驱动状态）。
+# 软变体还负责**把内核的原话带出来**（errno 文本），否则失败原因无从查起。
+
+# 写 sysfs 并把内核/shell 的错误信息回显出来（不退出）
+wb__pci_write_report() {
+  local path=$1 value=$2 what=$3 msg
+  [[ -n $path ]] || { wb_warn "${what:-写 sysfs} 失败：缺少路径"; return 1; }
+  if wb_is_dry_run; then
+    wb_log "  [dry-run] $path ← ${value:-（空）}"
+    return 0
+  fi
+  # 注意括号：重定向失败时是 **shell** 报错，必须把整个语句组重定向才能捕获到
+  if msg=$( { printf '%s\n' "$value" > "$path"; } 2>&1 ); then
+    return 0
+  fi
+  wb_warn "${what:-写 sysfs} 失败: ${msg:-（内核未返回信息）}（$path ← ${value:-（空）}）"
+  return 1
+}
+
+wb_pci_try_override() {
+  local bdf=${1:-} drv=${2:-}
+  [[ -d $(wb__pci_path "$bdf") ]] || { wb_warn "设备不存在: $bdf"; return 1; }
+  wb__pci_write_report "$(wb__pci_path "$bdf")/driver_override" "$drv" "$bdf driver_override=$drv"
+}
+
+wb_pci_try_override_clear() {
+  local bdf=${1:-}
+  [[ -d $(wb__pci_path "$bdf") ]] || { wb_warn "设备不存在: $bdf"; return 1; }
+  wb__pci_write_report "$(wb__pci_path "$bdf")/driver_override" "" "$bdf 清 driver_override"
+}
+
+wb_pci_try_unbind() {
+  local bdf=${1:-} p
+  p=$(wb__pci_path "$bdf")
+  [[ -e $p/driver ]] || return 0
+  wb__pci_write_report "$p/driver/unbind" "$bdf" "$bdf 解绑（当前 $(wb_pci_driver "$bdf")）"
+}
+
+wb_pci_try_bind() {
+  local bdf=${1:-} drv=${2:-}
+  [[ $(wb_pci_driver "$bdf") == "$drv" ]] && return 0
+  wb__pci_write_report "/sys/bus/pci/drivers/$drv/bind" "$bdf" "$bdf 绑定 $drv"
+}
+
+# 触发内核按 ID 匹配重新认领（在 driver_override 路径失败时可作回退）
+wb_pci_try_probe() {
+  local bdf=${1:-}
+  wb__pci_write_report /sys/bus/pci/drivers_probe "$bdf" "$bdf drivers_probe"
+}
+
 # 轮询等待驱动就位；超时 → 返回 1（**不退出**，由调用方决定严苛程度）
 wb_pci_wait_driver() {
   local bdf=${1:-} drv=${2:-} timeout=${3:-20} i

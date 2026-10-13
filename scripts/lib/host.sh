@@ -544,12 +544,18 @@ wb_host_gpu_live_passthrough() {
   # 让运行中的 vfio_pci 也带上动态 ID（与持久化姿态一致；否则后续 uevent 可能把它交给别人）
   wb_host_gpu_vfio_add_ids
 
+  # 逐个设备尽力而为：**用软变体**，任一失败都不中断循环
+  # （严格版 wb_pci_* 会 wb_fail 退出，`|| true` 拦不住 —— 实测踩过）
   for d in "$gpu" "$aud"; do
     [[ -n $d ]] || continue
     [[ $(wb_pci_driver "$d") == vfio-pci ]] && continue
-    wb_pci_override "$d" vfio-pci || true
-    wb_pci_unbind "$d" || true
-    wb_pci_bind "$d" vfio-pci || true
+    wb_pci_try_override "$d" vfio-pci
+    wb_pci_try_unbind "$d"
+    if ! wb_pci_try_bind "$d" vfio-pci; then
+      # 回退：让内核按 ID 重新匹配（动态 ID 已注册时这条能成）
+      wb_log "  回退：让内核按 ID 重新匹配 $d"
+      wb_pci_try_probe "$d"
+    fi
   done
 
   # 校验后才打勾（曾经在校验之前就打印"已交回宿主"，出现自相矛盾的输出）
@@ -578,10 +584,11 @@ wb_host_gpu_live_host() {
   wb_host_gpu_vfio_remove_ids
 
   # ② 清 driver_override（否则它钉死归属，amdgpu 绑不上）并解绑
+  #    软变体：任一设备失败也不中断整条流程
   for d in "$gpu" "$aud"; do
     [[ -n $d ]] || continue
-    wb_pci_override_clear "$d" || true
-    [[ $(wb_pci_driver "$d") == vfio-pci ]] && wb_pci_unbind "$d" || true
+    wb_pci_try_override_clear "$d"
+    [[ $(wb_pci_driver "$d") == vfio-pci ]] && wb_pci_try_unbind "$d"
   done
 
   # ③ **先加载模块，再显式绑定** —— 原来顺序反了（probe 在 modprobe 之前），
@@ -594,7 +601,7 @@ wb_host_gpu_live_host() {
     want=amdgpu
     [[ $d == "$aud" ]] && want=snd_hda_intel
     [[ $(wb_pci_driver "$d") == "$want" ]] && continue
-    wb_write "/sys/bus/pci/drivers/$want/bind" "$d" || wb_warn "$d 显式绑定 $want 失败"
+    wb_pci_try_bind "$d" "$want" || wb_pci_try_probe "$d"
   done
 
   # ④ 校验后才打勾
