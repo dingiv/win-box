@@ -394,6 +394,8 @@ else
 fi
 
 HOOKS=$TMP/hooks
+# 干跑不该要求 root（否则没人能先看清它会改什么）
+check 'reset-hook 干跑不需要 root' 0 "$WB_ROOT/scripts/bin/winbox" -n reset-hook install --takeover
 check 'reset-hook install（WB_HOOK_ROOT 覆盖，不需 root）' 0 \
   env WB_HOOK_ROOT="$HOOKS" WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" reset-hook install
 HOOKFILE=$(find "$HOOKS" -name '10-winbox-reset.sh' -print -quit 2>/dev/null || true)

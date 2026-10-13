@@ -44,6 +44,9 @@ LOG=${WB_RESET_LOG:-/var/log/winbox-reset.log}
 CONF=$(wb_conf_path)
 
 need_root() {
+  # 干跑只打印、不落盘 → 不需要 root（与 host-prep / host-gpu 的策略一致：
+  # 让人先看清"会改什么"再决定是否 sudo）
+  wb_is_dry_run && return 0
   [[ $HOOK_ROOT != /etc/libvirt/hooks ]] || wb_require_root
   return 0
 }
