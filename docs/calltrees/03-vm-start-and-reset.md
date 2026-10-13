@@ -1,19 +1,20 @@
-# 链 03：启动与复位轮回（libvirt 钩子）
+# 链 03：启动与复位轮回（复位是 `vm start` 的前置步骤）
 
 > 这是本项目的**核心机制**：把「AMD 核显复位 bug」从"每次都要冷启动宿主"降级为"每次启动多等 20–30 秒"。
 
-## 3.1 `vmctl start <vm>`（含 prepare-begin 钩子）
+## 3.1 `vmctl start [--no-reset]`
 
 ```
 vmctl start win11()
     wb_conf_load(); VM ← 参数或配置
     if [virsh domstate $VM] != "shut off": 终止(码 3, "已在运行")
 
-    ["virsh start $VM"]
-        └─ libvirt 执行 /etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/10-*.sh
-                                                                    ↓
-                        10-*.sh 内容 = source lib/*.sh; wb_gpu_reset_cycle; exit 0
-                                                                    ↓
+    ── 前置步骤：核显真复位（**不用钩子**，由本命令直接执行）───────────────
+    姿态 = wb_host_gpu_detect()
+    if --no-reset:            警告后跳过（客机可能出现代码 43）
+    elif 姿态 == host:        跳过（核显归宿主，本就不需要复位）
+    else:                     wb_require_root()   ← 非 root 直接拒绝启动（码 3）
+                              wb_gpu_reset_cycle()
     ┌─────────────────────── wb_gpu_reset_cycle() ───────────────────────┐
     │ 1) 现状                                                            │
     │    wb_pci_driver(GPU) → drv                                        │
@@ -65,7 +66,7 @@ if 启动耗时异常长:
     └─ 正常：复位轮回会等 WC_REBOOT_WAIT + 驱动初始化；--verbose 可看每步耗时
 
 if 需要临时禁用轮回:
-    └─ winbox reset-hook remove   （或删钩子文件）
+    └─ winbox vm start --no-reset   （显式跳过复位；仅在你确实知道 GPU 状态干净时用）
 ```
 
 ## 3.3 钩子为什么用「函数库」而不独立成脚本

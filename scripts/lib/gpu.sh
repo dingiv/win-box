@@ -6,12 +6,13 @@
 # 本文件只有一个"主角"：wb_gpu_reset_cycle —— 用 amdgpu 做一次真复位（MODE2 reset），
 # 让 AMD 核显从"脏状态"回到可被 vfio-pci 交付给客机的状态。
 #
-# 它被两条路径复用：
-#   * 人手调用（调试：看每一步的驱动归属与耗时）
-#   * libvirt 的 prepare/begin 钩子（VM 每次启动前）
+# 谁调用它：**`winbox vm start`**（启动 VM 之前自动执行）。本项目**不使用 libvirt 钩子、
+# 也不安装任何 systemd 服务** —— 复位就是启动流程里的一个步骤，由我们自己的命令驱动：
+# 这样它和"当前姿态""是否 root""有没有别的机制在抢设备"都在同一处可见、可诊断。
 #
-# ★ 关键约束：被钩子调用时，**任何失败都不能阻止 VM 启动**。
-#   因此本函数内部不使用 wb_fail，所有异常降级为日志，最后 return 0。
+# ★ 约束：本函数内部不使用 wb_fail（失败降级为日志），返回值表达结果：
+#     0 = 确实做了一次复位（amdgpu 绑上又被解绑 → 内核执行 MODE2 reset）
+#     1 = 未能复位（amdgpu 不可用等）—— 由调用方决定是警告还是拒绝继续
 
 [[ -n ${WB_LIB_GPU_LOADED:-} ]] && return 0
 WB_LIB_GPU_LOADED=1
@@ -38,7 +39,7 @@ wb__gpu_log() {
 # wb_gpu_reset_cycle [WAIT_SECONDS]
 #   永远 return 0；退出码不代表成败，日志才代表。
 wb_gpu_reset_cycle() {
-  local wait_s=${1:-} gpu aud drv t0=$SECONDS
+  local wait_s=${1:-} gpu aud drv t0=$SECONDS reset_done=0
 
   gpu=$(wb_conf_get_default WB_GPU_BDF "")
   aud=$(wb_conf_get_default WB_AUDIO_BDF "")
@@ -46,11 +47,11 @@ wb_gpu_reset_cycle() {
 
   if [[ -z $gpu ]]; then
     wb__gpu_log "[reset] 跳过：未配置 WB_GPU_BDF（先跑 winbox detect --write）"
-    return 0
+    return 1
   fi
   if (( EUID != 0 )); then
-    wb__gpu_log "[reset] 跳过：需要 root（钩子由 libvirt 以 root 调用）"
-    return 0
+    wb__gpu_log "[reset] 跳过：需要 root（复位要写 /sys）"
+    return 1
   fi
 
   wb__gpu_log "[reset] 开始 gpu=$gpu audio=${aud:-（无）} wait=${wait_s}s"
@@ -82,6 +83,7 @@ wb_gpu_reset_cycle() {
   if [[ $(wb_pci_driver "$gpu") == amdgpu ]]; then
     wb_pci_override_clear "$gpu" || wb__gpu_log "[reset] ⚠ 清空 driver_override 失败"
     wb_pci_unbind "$gpu" || wb__gpu_log "[reset] ⚠ 解绑 amdgpu 失败"
+    reset_done=1
     local evidence
     evidence=$(dmesg 2>/dev/null | grep -iE 'MODE2 reset|finishing device' | tail -1 || true)
     wb__gpu_log "[reset] 复位证据: ${evidence:-（dmesg 无相关行）}"
@@ -98,7 +100,8 @@ wb_gpu_reset_cycle() {
     final+="$d=$(wb_pci_driver "$d") "
   done
   wb__gpu_log "[reset] 结束（$(( SECONDS - t0 ))s）: ${final% }"
-  return 0
+  (( reset_done )) || wb__gpu_log "[reset] 结论: 本次**未完成复位**"
+  return "$(( reset_done ? 0 : 1 ))"
 }
 
 # ── ROM 部署 ──────────────────────────────────────────────────────────────

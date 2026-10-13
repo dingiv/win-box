@@ -32,7 +32,7 @@ WB_VERSION=$(cat -- "$WB_ROOT/VERSION" 2>/dev/null || printf 'unknown')
 WB_COMMANDS=(
   detect conf adopt status evidence
   host-prep host-gpu vm-create gpu-attach
-  lg-prepare lg-shmem reset-hook lg
+  lg-prepare lg-shmem lg
   rom vm
 )
 
@@ -93,7 +93,6 @@ wb__cmd_desc() {
     gpu-attach) printf '把核显挂进虚拟机（ROM + root port + x-vga 模式）' ;;
     lg-prepare) printf 'Looking Glass 宿主侧准备（KVMFR 模块 + 构建客户端）' ;;
     lg-shmem)   printf '把共享内存设备挂进虚拟机' ;;
-    reset-hook) printf '安装/移除/测试复位轮回钩子' ;;
     lg)         printf '启动 Looking Glass 客户端' ;;
     rom)        printf 'ROM 工具（info/verify/patch/merge/dump/extract）' ;;
     vm)         printf '虚拟机日常运维（= vmctl）' ;;

@@ -74,7 +74,7 @@ case $SUB in
   build)
     wb_log '== 构建 romtool =='
     wb_run make -C "$TOOL_DIR" || wb_fail 1 rom "构建失败" "docs/interfaces/03-romtool.md"
-    wb_ok "产物: $BIN"
+    wb_ok_real "产物: $BIN"
     wb_hint '离线自测: make -C src/romtool test（用合成 ROM，不需要硬件）'
     exit 0 ;;
 esac

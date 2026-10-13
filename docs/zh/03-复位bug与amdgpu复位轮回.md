@@ -2,7 +2,8 @@
 
 > 结论：核显直通后，**VM 每次启动前让宿主 `amdgpu` 短暂绑定再解绑一次**，
 > 内核会执行 `MODE2 reset`，把 GPU 恢复到干净状态，客户机驱动才能正常初始化。
-> 已做成 libvirt 钩子（`sudo winbox reset-hook install`），从此不必每次冷启动宿主。
+> 现在是 **`winbox vm start` 的前置步骤**（不用钩子、不装服务）：启动前自动做一次真复位，
+> 从此不必每次冷启动宿主。
 
 ## 1. 症状
 
@@ -39,7 +40,7 @@ isc30 仓库 issue #135 里 2026-09 的一条评论（Raphael 7950X3D `1002:164e
 
 ## 3. 实现时的三个内核坑（每个都卡过一轮）
 
-`sudo winbox reset-hook test` 里对应三条：
+`scripts/lib/gpu.sh` 的 `wb_gpu_reset_cycle` 里对应三条：
 
 ### 坑 1：`ids=` 让 vfio-pci 在解绑瞬间抢回设备
 
@@ -75,7 +76,7 @@ echo amdgpu        > …/driver/unbind                                   # ✗ �
 ## 4. 成功后的证据
 
 ```
-$ sudo winbox reset-hook test 2>&1 | tee /tmp/reset-cycle.log
+$ sudo bash -c 'source scripts/lib/gpu.sh; wb_conf_load; wb_gpu_reset_cycle' 2>&1 | tee /tmp/reset-cycle.log
 === [2/4] 等 amdgpu 完成初始化（最多 30s）===
   ✓ amdgpu 已绑定（1s）
   --- dmesg: amdgpu 相关尾部 ---
@@ -94,20 +95,17 @@ $ sudo winbox reset-hook test 2>&1 | tee /tmp/reset-cycle.log
 顺带一个重要结论：**amdgpu 能把核显完整跑起来**（rings/SDMA/VCN/显示引擎/fb 全 OK）
 → 证明硬件与固件没问题，客机侧的问题一定是"环境/状态"层面的。
 
-## 5. 钩子化（免冷启动）
+## 5. 自动化（免冷启动）
+
+**不用钩子、也不装服务**：复位是 `winbox vm start` 里的前置步骤（脚本位置：
+`scripts/bin/vmctl` 的 `start` 分支；实现：`scripts/lib/gpu.sh` 的 `wb_gpu_reset_cycle`）。
 
 ```bash
-sudo winbox reset-hook install
-```
-
-安装到 libvirt 6.10+ 的现代钩子目录：
-
-```
-/etc/libvirt/hooks/qemu.d/win11/prepare/begin/10-amdgpu-reset-cycle.sh
+sudo ./winbox vm start        # 直通姿态下会先复位（多等 20–30 秒是故意的）
 ```
 
 设计要点：
-- **钩子必须自己 `modprobe amdgpu`**：amdgpu 在宿主上是**被拉黑**的（开机不自动加载），
+- **必须自己 `modprobe amdgpu`**：宿主不会自动加载它（设备被 vfio-pci 认领；黑名单也拦不住显式 modprobe），
   若钩子只写 `driver_override` + `drivers_probe`，冷启动后的第一次启动会因为"驱动不存在"
   直接跳过复位（实测踩过：日志出现 `WARN: amdgpu 未绑定（当前 (none)），本次跳过复位`）。
   好在冷启动后第一次启动本来就干净，真正需要复位的是**后续每次启动**；
@@ -124,5 +122,5 @@ sudo winbox reset-hook install
 | `RadeonResetBugFix`（Windows 服务） | 需要 VM 里存在虚拟显卡（与 `video=none` 冲突）；且社区认为当前版本场景下无必要 |
 | 自己 `echo 1 > …/reset` | 核显不支持 FLR，会得到 `Inappropriate ioctl for device` |
 
-（`winbox reset-hook test` 保留了一个"PCI remove + rescan"的尽力而为版本，
+（`scripts/lib/gpu.sh` 里还留了一个"PCI remove + rescan"的尽力而为版本，
 但**可靠的只有 `MODE2 reset` 那条路**：要么手动跑 22 号脚本，要么用 25 号钩子。）

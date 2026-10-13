@@ -19,6 +19,10 @@ source "$WB_LIB_DIR/log.sh"
 source "$WB_LIB_DIR/sys.sh"
 # shellcheck source=../lib/conf.sh
 source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/gpu.sh
+source "$WB_LIB_DIR/gpu.sh"          # 复位轮回（启动前置步骤）
+# shellcheck source=../lib/host.sh
+source "$WB_LIB_DIR/host.sh"         # 宿主核显姿态（决定要不要复位）
 # shellcheck source=../lib/xml.sh
 source "$WB_LIB_DIR/xml.sh"
 
@@ -33,7 +37,8 @@ usage() {
 日常运维:
   list                 列出所有虚拟机
   status               状态 + 资源占用
-  start                开机（若装了复位钩子，启动前会自动做一次核显真复位）
+  start [--no-reset]   开机。直通姿态下**启动前先做一次核显真复位**（MODE2 reset），
+                       会多等 20–30 秒（故意的）；--no-reset 显式跳过
   shutdown             正常关机（ACPI，等待直到关闭；默认超时 180s）
   destroy              强制断电（危险：曾损坏 NTFS，仅假死时用）
   console | viewer     打开图形控制台
@@ -83,11 +88,37 @@ case $CMD in
     ;;
   status) vm_status ;;
   start)
+    NO_RESET=0
+    if [[ ${1:-} == --no-reset ]]; then NO_RESET=1; shift; fi
     state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
     [[ $state == shutoff ]] || wb_fail 3 vm "VM $VM 已是 $state" "docs/interfaces/02-vmctl.md"
+
+    # ── 启动前：核显真复位（MODE2 reset）─────────────────────────────────
+    # 这是本项目的核心规避手段（AMD 核显的复位 bug）：VM 关掉后 GPU 处于脏状态，
+    # 不复位直接再启动 → 客机里代码 43。复位要写 /sys（需 root），因此直通姿态下
+    # 非 root 会拒绝启动并给出 sudo 命令 —— 与其给你一个必然 43 的客机，不如说清楚。
+    if (( NO_RESET )); then
+      wb_warn '按 --no-reset 跳过核显复位（客机可能出现代码 43）'
+    elif [[ $(wb_host_gpu_detect) == host ]]; then
+      wb_log '  宿主姿态（核显归宿主）：无需复位'
+    elif wb_is_dry_run; then
+      # 干跑不碰 /sys，也就不需要 root（与 host-prep / host-gpu 的策略一致）
+      wb_log '  [dry-run] 需要 root：将以 amdgpu 短暂接管触发 MODE2 reset，再把设备交回 vfio-pci'
+    else
+      wb_require_root
+      wb_log '  启动前核显真复位（amdgpu 短暂接管 → MODE2 reset → 交回 vfio-pci）'
+      wb_hint '这一步会多等 20–30 秒，是故意的（日志：/var/log/winbox-reset.log）'
+      if wb_gpu_reset_cycle; then
+        wb_ok '复位完成'
+      else
+        wb_warn '未能完成复位（amdgpu 不可用？）—— 客机可能出现代码 43'
+        wb_hint '看 winbox host-gpu status 与 /var/log/winbox-reset.log 定位'
+      fi
+    fi
+
     wb_run "${V[@]}" start "$VM" || wb_fail 1 vm "启动失败（看 /var/log/libvirt/qemu/$VM.log 与复位日志）" \
-      "docs/calltrees/03-vm-start-and-reset-hook.md"
-    wb_ok "已启动 $VM"
+      "docs/calltrees/03-vm-start-and-reset.md"
+    wb_ok_real "已启动 $VM"
     ;;
   shutdown)
     state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
@@ -116,7 +147,7 @@ case $CMD in
     ;;
   eject)
     wb_run "${V[@]}" change-media "$VM" sdb --eject --config >/dev/null 2>&1 || true
-    wb_ok "已弹出安装介质（若本来就没有光驱，此操作无副作用）"
+    wb_ok_real "已弹出安装介质（若本来就没有光驱，此操作无副作用）"
     ;;
   snapshot-save)
     NAME=${1:-}
@@ -126,7 +157,7 @@ case $CMD in
     [[ $state == shutoff ]] || wb_fail 3 vm "先关机（当前 $state）——磁盘快照必须在关机状态拍" "docs/interfaces/02-vmctl.md"
     wb_run "${V[@]}" snapshot-create-as "$VM" "$NAME" --disk-only --atomic --no-metadata \
       || wb_fail 1 vm "快照失败（名字重复？磁盘链有问题？）" "docs/interfaces/02-vmctl.md"
-    wb_ok "快照已创建: $NAME"
+    wb_ok_real "快照已创建: $NAME"
     "${V[@]}" snapshot-list "$VM"
     ;;
   snapshot-list) "${V[@]}" snapshot-list "$VM" ;;
@@ -136,7 +167,7 @@ case $CMD in
     state=$("${V[@]}" domstate "$VM" 2>/dev/null | tr -d ' ' || true)
     [[ $state == shutoff ]] || wb_fail 3 vm "先关机（当前 $state）" "docs/interfaces/02-vmctl.md"
     wb_run "${V[@]}" snapshot-revert "$VM" "$NAME" || wb_fail 1 vm "回滚失败" "docs/interfaces/02-vmctl.md"
-    wb_ok "已回滚到 $NAME"
+    wb_ok_real "已回滚到 $NAME"
     snapshot_warn_restore
     ;;
   template-path) wb_xml_template_path ;;

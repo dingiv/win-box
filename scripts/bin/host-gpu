@@ -83,7 +83,7 @@ show_status() {
   fi
   if [[ $(wb_pci_driver "$(wb_conf_get_default WB_GPU_BDF '')" 2>/dev/null || echo '') == amdgpu ]] \
      && [[ $mode == passthrough ]]; then
-    wb_hint '配置是直通姿态但核显当前归 amdgpu —— 重启后（或 winbox reset-hook test）才会绑到 vfio-pci'
+    wb_hint '配置是直通姿态但核显当前归 amdgpu —— 重启后，或 ./winbox vm start（启动前自带复位）才会交回 vfio-pci'
   fi
   return 0
 }

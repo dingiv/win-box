@@ -94,7 +94,7 @@ if wb_have_cmd virsh; then
     else
       wb_run virsh -c qemu:///system net-start default >/dev/null 2>&1 || true
       wb_run virsh -c qemu:///system net-autostart default >/dev/null 2>&1 || true
-      wb_ok '默认网络 default 已启动'
+      wb_ok_real '默认网络 default 已启动'
       CHANGED=1
     fi
   else
@@ -184,7 +184,7 @@ else
     wb_ok "$target 已在 kvm、libvirt 组"
   else
     for g in "${need[@]}"; do wb_run usermod -aG "$g" "$target"; done
-    wb_ok "已把 $target 加入: ${need[*]}（重新登录后生效）"
+    wb_ok_real "已把 $target 加入: ${need[*]}（重新登录后生效）"
     CHANGED=1
   fi
 fi

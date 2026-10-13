@@ -24,7 +24,6 @@
 ./winbox lg-prepare    # KVMFR 模块 + 构建 Looking Glass 客户端
 ./winbox lg-shmem      # 共享内存设备 + 权限双闸
 ./winbox lg            # 起窗口（--idd-prefs 应用客机 IDD 偏好）
-./winbox reset-hook    # 复位轮回钩子（免每次冷启动宿主）
 ./winbox status        # 全链路自检（退出码即结论）
 ./winbox evidence      # 一键取证包（14 项 + sha256 清单）
 ./winbox rom           # ROM 工具（C：info/verify/patch/merge/dump/extract）
@@ -63,8 +62,8 @@ sudo ./winbox vm-create                 # 3b. 建机（UEFI + TPM2），然后�
 sudo ./winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg   # 4. 挂核显
 sudo ./winbox lg-prepare    # 5. KVMFR 模块 + 构建 Looking Glass 客户端
 sudo ./winbox lg-shmem      # 6. 共享内存设备 + 权限双闸
-sudo ./winbox reset-hook install   # 7. 复位轮回钩子（免每次冷启动宿主）
-./winbox vm start && ./winbox lg   # 8. 开机 + 开窗口
+sudo ./winbox vm start      # 7. 开机（直通姿态下会先做一次核显真复位：多等 20–30 秒是故意的）
+./winbox lg                 # 8. 开窗口
 ```
 
 > 约定：**README 的示例一律写 `./winbox`**（clone 下来即可用，无需配置）；`docs/` 里写裸
@@ -134,9 +133,11 @@ win-box/
 **三条纪律**：幂等（先探测再改）、可干跑（`--dry-run`，所有系统改动都经 `wb_run`）、
 不静默兜底（探测不到就报错，不猜不降级）。
 
-**不引入 systemd 服务**：项目不含任何 `.service`（有断言守卫），也不会 `enable` 任何 unit。
-开机阶段的绑定如果由"别人写的脚本"负责，它只**探测并报告**；`--takeover` 停用归档，
-`purge` 清理我们归档过的那些（系统自带的服务绝不碰）。
+**不引入 systemd 服务，也不使用 libvirt 钩子**：
+- 项目不含任何 `.service`（有断言守卫），也不会 `enable` 任何 unit；
+- 核显复位是 `winbox vm start` 里的一个**前置步骤**（不是钩子）：启动前用 amdgpu 触发 MODE2 reset
+  再交回 vfio-pci，所以**请用 `sudo ./winbox vm start` 启动虚拟机**（`--no-reset` 可显式跳过）；
+- 开机阶段的绑定若由"别人写的脚本"负责，只**探测并报告**（`--takeover` 停用归档，`purge` 清理归档件）。
 
 **C 的准入门槛**：只有当 shell 不适合时才写 C —— 目前只有 ROM 结构解析/校验/合并
 （`src/romtool/`，`make test` 用**合成 ROM** 离线自测，仓库内不含任何 AMD 二进制）。

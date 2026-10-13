@@ -16,7 +16,7 @@ vmctl <command> <vm> [args]
 | 命令 | 输入 | 输出 | 失败语义 |
 | --- | --- | --- | --- |
 | `list` | — | 所有 domain 的名字 + 状态 | 码 1 = libvirt 不可连（提示 `systemctl start libvirtd`） |
-| `start [vm]` | — | domain 启动；若配置了复位钩子，启动前会等待复位完成 | 码 5 = 复位钩子日志显示 amdgpu 未绑定（提示冷启动）；码 3 = 已在运行 |
+| `start [vm] [--no-reset]` | — | **直通姿态下先做核显真复位**（`wb_gpu_reset_cycle`：amdgpu 短暂接管 → MODE2 reset → 交回 vfio-pci），再 `virsh start` | 码 3 = 已在运行 / **非 root（复位要写 `/sys`，故拒绝启动并给出 `sudo` 命令）**；`--no-reset` 显式跳过 |
 | `shutdown [vm]` | — | 发 ACPI 关机请求，**等待**直到 `shut off`（默认超时 180s） | 码 1 = 超时（提示可用 `destroy`，并警告 NTFS 风险） |
 | `destroy [vm]` | — | 强制断电 | 命令本身总成功；但**输出警告**：强制断电曾损坏 NTFS，仅在假死时使用 |
 | `reboot [vm]` | — | 重启 | 同上 |
@@ -46,7 +46,7 @@ vmctl <command> <vm> [args]
 
 1. **绝不用 `destroy` 达成 `shutdown` 的目的**：`snapshot-save` 与 `shutdown` 内部一律走 ACPI；`destroy` 只能由用户显式调用。
 2. **快照 = 磁盘外部快照**：`snapshot-save --disk-only --atomic` 保留可用状态为独立 qcow2；回滚后 VM 的磁盘链恢复。
-3. **回滚后的第一次启动**可能需要复位钩子或冷启动（见 `docs/zh/03-复位bug与amdgpu复位轮回.md`）——`snapshot-restore` 成功后主动打印这条提示。
+3. **回滚后的第一次启动**建议直接 `sudo ./winbox vm start`（它会先做一次核显真复位；见 `docs/zh/03-复位bug与amdgpu复位轮回.md`）——`snapshot-restore` 成功后主动打印这条提示。
 4. **VM 名解析顺序**：命令行参数 > `WB_VM_NAME` 环境变量 > 配置文件 > 内置默认 `win11`。
 5. **`status` 的 IP 获取**：优先读 libvirt DHCP lease；失败则尝试客机 SSH（配置存在时）；都失败显示 `(未知)` 而非报错。
 

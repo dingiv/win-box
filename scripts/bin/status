@@ -79,7 +79,7 @@ if [[ $SCOPE == all || $SCOPE == host ]]; then
       wb_report_item ok "核显驱动：vfio-pci（可以直通）"
     elif [[ $drv == amdgpu ]]; then
       wb_report_item bad "核显被 amdgpu 占用（应从宿主手里交出）" \
-        'sudo winbox reset-hook test 或 sudo winbox gpu-attach；仍不行则冷启动宿主'
+        'sudo ./winbox host-gpu passthrough（vm start 会在启动前做复位）；仍不行则冷启动宿主'
     else
       wb_report_item warn "核显驱动：$drv" 'vmctl start 时 libvirt 会临时接管；持续如此请查 vfio 配置'
     fi
@@ -90,7 +90,7 @@ if [[ $SCOPE == all || $SCOPE == host ]]; then
         wb_report_item ok "HDMI 音频功能驱动：vfio-pci"
       else
         wb_report_item warn "HDMI 音频功能驱动：$adrv（应从宿主手里交出）" \
-          '跟随核显一起绑定，见 docs/calltrees/03-vm-start-and-reset-hook.md'
+          '跟随核显一起绑定，见 docs/calltrees/03-vm-start-and-reset.md'
       fi
     fi
 
@@ -252,18 +252,16 @@ if [[ $SCOPE == all || $SCOPE == host ]]; then
     fi
     rm -f -- "$tmp"
 
-    hook_root=${WB_HOOK_ROOT:-/etc/libvirt/hooks}
-    hook_dir="$hook_root/qemu.d/$VM/prepare/begin"
-    hooks=$(find "$hook_dir" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' || true)
-    if [[ -z ${hooks// /} ]]; then
-      wb_report_item warn '复位轮回钩子未安装（VM 关机后需冷启动宿主才能再直通）' \
-        'sudo winbox reset-hook install'
-    elif [[ $hooks == *10-winbox-reset.sh* ]]; then
-      wb_report_item ok "复位轮回钩子已安装（winbox）：$hooks" \
-        "日志: ${WB_RESET_LOG:-/var/log/winbox-reset.log}"
+    # 复位前提：amdgpu 模块可用（vm start 会用它做 MODE2 reset）
+    if modinfo -n amdgpu >/dev/null 2>&1; then
+      if [[ $(wb_conf_get_default WB_HOST_GPU_MODE '') == host ]]; then
+        wb_report_item ok '复位前提：amdgpu 模块可用（当前宿主姿态，启动 VM 时不需要复位）'
+      else
+        wb_report_item ok '复位前提：amdgpu 模块可用（winbox vm start 会在启动前做 MODE2 reset）'
+      fi
     else
-      wb_report_item ok "复位轮回钩子已安装：$hooks" \
-        '这不是 winbox 装的：旧钩子可能缺少 modprobe amdgpu 那一步（冷启动后会静默跳过复位）→ sudo winbox reset-hook install'
+      wb_report_item bad '找不到 amdgpu 模块：复位轮回无法执行' \
+        '核显直通依赖它做真复位；确认内核模块可用（modinfo -n amdgpu）'
     fi
 
     snaps=$(virsh -c qemu:///system snapshot-list --name "$VM" 2>/dev/null | tr -d ' ' | sed '/^$/d' || true)

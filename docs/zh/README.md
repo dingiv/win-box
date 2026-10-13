@@ -55,7 +55,7 @@
 | `04` | `sudo winbox rom dump --bdf <BDF> OUT` |
 | `05` `07` `23` `24` | `winbox gpu-attach`（+ `winbox rom patch`） |
 | `06` `21` | `sudo winbox lg-shmem`（权限双闸） |
-| `11` `22` | `sudo winbox reset-hook test` |
+| `11` `22` | `sudo ./winbox vm start`（启动前会自动做一次真复位；复位逻辑本身在 `lib/gpu.sh`） |
 | `12` | `winbox evidence` |
 | `13` | `winbox vm mode <test\|inspect\|both\|lg>` |
 | `14` | `winbox vm snapshot-save [名字]` |
@@ -63,7 +63,7 @@
 | `18` | `sudo winbox lg-shmem` |
 | `19` | `winbox lg-prepare --skip-deps --skip-kvmfr` |
 | `20` | `winbox lg` |
-| `25` | `sudo winbox reset-hook install` |
+| `25` | 已废弃：项目不再用 libvirt 钩子，复位改为 `vm start` 的前置步骤 |
 | `26` | `winbox lg --idd-prefs`（查看用 `--idd-show`） |
 | `27` | `winbox status` |
 | `vmctl.sh` | `winbox vm <子命令>` |

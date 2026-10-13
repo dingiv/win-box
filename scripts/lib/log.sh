@@ -37,6 +37,10 @@ wb_ok()   { (( WB_QUIET )) && return 0; printf '  %s %s\n' "$(wb__paint 32 '✓'
 # 警告不受 --quiet 抑制：它在语义上属于"必须让用户看到的信息"
 wb_warn() { printf '  %s %s\n' "$(wb__paint 33 '⚠')" "$*" >&2; }
 
+# 只在**真跑**时打勾：干跑下说"已完成/已启动"就是另一种假成功
+# （同一类问题踩过三次：干跑谎报已生效 / 已删除 / 已启动 —— 用这个函数收口）
+wb_ok_real() { (( WB_DRY_RUN )) && return 0; wb_ok "$@"; }
+
 wb_step() {
   (( WB_QUIET )) && return 0
   printf '\n%s %s\n' "$(wb__paint 1 "== ${1:-}")" "${2:-}" >&2

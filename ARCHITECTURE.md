@@ -88,9 +88,9 @@
 ### 2.3 复位链路（免冷启动宿主）
 
 ```
-winbox vm start
-   → libvirt 执行钩子 /etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/10-winbox-reset.sh
-   → source scripts/lib/*.sh; wb_gpu_reset_cycle; exit 0
+winbox vm start                        ← 复位是启动流程里的一个步骤，不是钩子
+   → 姿态判定：host 姿态则跳过；直通姿态则要求 root（否则拒绝启动，码 3）
+   → wb_gpu_reset_cycle()
         ├─ 写 driver_override = amdgpu      ← 必须先写，否则 vfio-pci 凭 ids= 抢回
         ├─ 解绑当前驱动
         ├─ modprobe amdgpu                  ← 必须自己加载（宿主不会自动加载它：设备被 vfio-pci 认领）
@@ -101,8 +101,10 @@ winbox vm start
    → QEMU 启动 → 客机驱动初始化成功
 ```
 
-**钩子必须永远 `exit 0`**：复位失败也不能阻止 VM 启动。因此 `wb_gpu_reset_cycle`
-内部不使用 `wb_fail`，所有异常降级为日志（冒烟测试里有专门断言锁住这条）。
+**复位失败时如实报告、不假装**：`wb_gpu_reset_cycle` 内部不使用 `wb_fail`（异常降级为日志），
+而是用返回值表达结果（0 = 确实做了一次复位 / 1 = 未能复位），由 `vm start` 决定怎么告知；
+`--no-reset` 是显式的逃生门。**非 root 时直接拒绝启动**（码 3）—— 与其给一个必然代码 43 的客机，
+不如说清楚要 `sudo`。
 
 ## 3. 状态机
 
@@ -160,7 +162,7 @@ blacklist amdgpu 不参与判定（拦不住显式 modprobe，且设备已被认
  shut off ──start──▶ running ──ACPI shutdown──▶ shut off
     │                   │                          │
     │ 可改域定义          │ 只读自检（winbox status）   │ 可拍快照
-    │ （redeploy）        │ 复位钩子在 start 之前执行     │ 可回滚
+    │ （redeploy）        │ vm start 会先做核显真复位     │ 可回滚
     │                   │ 不要 destroy（曾损坏 NTFS）   │
 ```
 

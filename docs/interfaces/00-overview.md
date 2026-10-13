@@ -52,7 +52,7 @@ L3  lib/*.sh                    函数库：原子操作，可 source，可单�
 2. **可干跑**：所有 mutating 命令支持 `--dry-run`，打印将要执行的系统改动，不落盘。
 3. **不静默兜底**：能自动探测的自动探测；探测不到一律报错（码 3/4），不猜、不降级、不"尽力而为"。
 
-**sudo 策略**：只有真正写 `/etc`、`/sys`、加载模块的命令需要 root（`host-prep` / `gpu-attach` / `lg-prepare` / `reset-hook`）；`detect` / `status` / `evidence` / `vmctl` / `lg-run` / `rom info|verify|patch` 不需要。命令在缺 root 时报码 3 并直接给出 `sudo` 命令。
+**sudo 策略**：只有真正写 `/etc`、`/sys`、加载模块的命令需要 root（`host-prep` / `gpu-attach` / `lg-prepare` / `host-gpu`；以及**直通姿态下的 `vm start`**——它要先做核显复位）；`detect` / `status` / `evidence` / 其它 `vmctl` 子命令 / `lg-run` / `rom info|verify|patch` 不需要。命令在缺 root 时报码 3 并直接给出 `sudo` 命令。
 
 **配置**：唯一入口 `config/win-box.conf`（由 `winbox detect` 生成、`winbox conf` 检视）。所有 BDF、ID、路径、IP、VM 名从这里读；环境变量可覆盖同名键（`WB_*`），优先级：命令行 > 环境变量 > 配置文件 > 内置默认。
 

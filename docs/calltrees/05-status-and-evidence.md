@@ -8,7 +8,7 @@ winbox status()
         for BDF in {WB_GPU_BDF, WB_AUDIO_BDF}:
             drv = wb_pci_driver(BDF)
             if drv == vfio-pci: item(ok)
-            else:               item(bad, "应绑 vfio-pci", 提示 winbox reset-hook test)
+            else:               item(bad, "应绑 vfio-pci", 提示 sudo ./winbox host-gpu passthrough)
         if [lsmod | grep ^amdgpu]:
             item(warn, "amdgpu 已加载于宿主", "若核显在 vfio-pci 上属正常残留")
     wb_report_section(宿主: 内核与固件)
@@ -20,7 +20,7 @@ winbox status()
         客户端进程是否在运行（pgrep，用于"窗口是否开着"）
     wb_report_section(libvirt)
         domain 状态；XML 关键项回读（rom file / x-vga / ivshmem 参数 / video=none）
-        复位钩子文件是否存在且可执行
+        amdgpu 模块是否可用（vm start 的复位前提：modinfo -n amdgpu）
     wb_report_section(客机)
         if ! wb_guest_ready(): item(warn, "无 SSH 通道，跳过客机检查")
         else:
@@ -52,7 +52,7 @@ winbox evidence()
         06-qemu-argv.txt        domxml-to-native qemu-argv | grep 关键参数
         07-kvmfr.txt            dmesg kvmfr / 设备类型 / 尺寸
         08-dmesg-gpu.txt        dmesg | grep -iE 'amdgpu|vfio|reset'
-        09-reset-hook.log       /var/log/winbox-reset.log 尾部
+        09-reset.log            /var/log/winbox-reset.log 尾部（vm start 每次启动前写入）
         10-guest.txt            wb_guest_* 报告（无 SSH 则写说明）
         11-versions.txt         内核 / QEMU / libvirt / LG 客户端版本
     if --after: 追加"关机后"快照（与运行中对比最能看出复位问题的差异）

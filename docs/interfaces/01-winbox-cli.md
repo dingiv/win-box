@@ -112,12 +112,11 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 3 = VM 运行中 / `/dev/kvmfr0` 不是字符设备
 - **生命周期**：幂等（渲染即全量重建）
 
-#### `winbox reset-hook <install|remove|test>`
+#### （已移除）`winbox reset-hook`
 
-- **输入**：动作
-- **输出**：`/etc/libvirt/hooks/qemu.d/<vm>/prepare/begin/10-*.sh` 与日志 `/var/log/winbox-reset.log`
-- **失败**：码 3 = 非 root；`test` 时若 amdgpu 未能绑定 → 码 5（提示需冷启动）
-- **生命周期**：幂等；钩子本体**永远 exit 0**（绝不阻塞 VM 启动）
+本项目**不使用 libvirt 钩子**：核显复位是 `winbox vm start` 里的前置步骤（见 `02-vmctl.md`），
+由我们自己的命令驱动，与"当前姿态 / 是否 root / 有没有别的机制在抢设备"在同一处可见。
+`vm start --no-reset` 可显式跳过。
 
 #### `winbox lg [--idd-prefs|--idd-show|--ini-reset] [客户端参数…]`
 

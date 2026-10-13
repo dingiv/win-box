@@ -158,7 +158,7 @@ check '未知命令 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" frobnicate
 # 仍保留作为防御，但默认情况下不该被触达）
 check '所有命令都已实现（无半成品入口）' 0 bash -c "
   for c in detect conf adopt status evidence host-prep vm-create gpu-attach \
-           lg-prepare lg-shmem reset-hook lg rom vmctl; do
+           lg-prepare lg-shmem lg rom vmctl; do
     [[ -x '$WB_ROOT/scripts/bin/'\$c ]] || { echo \"缺: \$c\"; exit 1; }
   done"
 hout=$("$WB_ROOT/scripts/bin/winbox" --help 2>&1)
@@ -262,16 +262,18 @@ check 'wb_gpu_rom_fingerprint 对不存在文件 → 码 3' 3 bash -c "
   export WB_ROOT=$WB_ROOT
   source '$WB_ROOT/scripts/lib/gpu.sh'
   wb_gpu_rom_fingerprint '$TMP/nope.rom'"
-check '未配置核显时 wb_gpu_reset_cycle 安全返回 0' 0 bash -c "
+check '未配置核显时 wb_gpu_reset_cycle 返回 1（未复位，但不报错）' 1 bash -c "
   export WB_ROOT=$WB_ROOT WB_CONF_PATH=$TMP/absent.conf WB_RESET_LOG=$TMP/reset.log
   source '$WB_ROOT/scripts/lib/gpu.sh'
   wb_gpu_reset_cycle"
-check 'set -e 下 wb_gpu_reset_cycle 也不中断' 0 bash -c "
+# 语义变化（有意）：函数用**返回值**表达"是否真的复位了"（1 = 未复位），
+# 所以调用方要在 if/else 里接（vm start 就是这么做的）；用 if 调用时 set -e 不会中断。
+check 'set -e 下用 if 调用不会中断脚本' 0 bash -c "
   set -euo pipefail
   export WB_ROOT=$WB_ROOT WB_CONF_PATH=$TMP/absent.conf WB_RESET_LOG=$TMP/reset.log
   source '$WB_ROOT/scripts/lib/gpu.sh'
-  wb_gpu_reset_cycle 1
-  echo reached"
+  if wb_gpu_reset_cycle 1; then r=0; else r=1; fi
+  echo \"reached r=\$r\""
 
 printf '\n== 14. 模板渲染（完全离线，用 libvirt 自己的 schema 校验）==\n'
 RENDER_CONF=$TMP/render.conf
@@ -366,7 +368,7 @@ for kv in \
   check "adopt 提取 ${kv%%=*}" 0 grep -qx -- "$kv" "$TMP/adopt.conf"
 done
 
-printf '\n== 16. gpu-attach 与 reset-hook（假 virsh，离线）==\n'
+printf '\n== 16. gpu-attach 与 vm start 的复位前置（假 virsh，离线）==\n'
 # 本机真实核显 BDF（没核显就跳过——测试不能假设硬件存在）
 GBDF=$(bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/detect.sh'; wb_detect_igpu" 2>/dev/null | awk '/^vga /{print $2}')
 ABDF=$(bash -c "export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/detect.sh'; wb_detect_igpu" 2>/dev/null | awk '/^audio /{print $2}')
@@ -393,20 +395,98 @@ else
   ok '本机无 AMD 核显，跳过 gpu-attach 断言'
 fi
 
-HOOKS=$TMP/hooks
-# 干跑不该要求 root（否则没人能先看清它会改什么）
-check 'reset-hook 干跑不需要 root' 0 "$WB_ROOT/scripts/bin/winbox" -n reset-hook install --takeover
-check 'reset-hook install（WB_HOOK_ROOT 覆盖，不需 root）' 0 \
-  env WB_HOOK_ROOT="$HOOKS" WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" reset-hook install
-HOOKFILE=$(find "$HOOKS" -name '10-winbox-reset.sh' -print -quit 2>/dev/null || true)
-check '钩子文件已生成' 0 bash -c "[[ -n '$HOOKFILE' && -x '$HOOKFILE' ]]"
-check '钩子内容调 wb_gpu_reset_cycle 且总 exit 0' 0 bash -c "
-  grep -q wb_gpu_reset_cycle '$HOOKFILE' && grep -qx 'exit 0' '$HOOKFILE'"
-check '钩子里的配置路径是绝对路径（libvirt 环境没有 cwd）' 0 bash -c "
-  grep -q \"^WB_CONF_PATH='/\" '$HOOKFILE'"
-check 'reset-hook remove' 0 \
-  env WB_HOOK_ROOT="$HOOKS" WB_CONF_PATH="$TMP/attach.conf" "$WB_ROOT/scripts/bin/winbox" reset-hook remove
-check '卸载后钩子文件消失' 0 bash -c "[[ ! -e '$HOOKFILE' ]]"
+# ── vm start 的复位前置 ───────────────────────────────────────────────────
+# 本项目**不用 libvirt 钩子/服务**：复位是 vm start 里的一个步骤。
+# 用假 virsh + 夹具姿态目录把这件事离线测干净。
+VSTART_CFG="$TMP/vstart.conf"
+{
+  printf '%s\n' 'WB_VM_NAME=testvm' 'WB_VM_UUID=11111111-2222-3333-4444-555555555555' 'WB_VM_DISK=/tmp/vs.qcow2'
+} > "$VSTART_CFG"
+mkdir -p "$TMP/bin3"
+cat > "$TMP/bin3/virsh" <<'EOS'
+#!/usr/bin/env bash
+echo "$*" >> "${VIRSH_CALLS:-/dev/null}"     # 记录被调用的子命令，供顺序断言用
+case "$*" in
+  *domstate*) printf 'shut off\n' ;;
+  *)          exit 0 ;;
+esac
+EOS
+chmod +x "$TMP/bin3/virsh"
+
+# 夹具姿态：有 ids= → 判定为直通姿态 → vm start 必须做复位
+mkdir -p "$TMP/vs-pa"
+printf '%s\n' 'options vfio-pci ids=1002:13c0' > "$TMP/vs-pa/10-test.conf"
+# 夹具姿态：什么都没有 → host → 不需要复位
+mkdir -p "$TMP/vs-host"
+printf '%s\n' '# 空' > "$TMP/vs-host/10-test.conf"
+
+vsrun() { env PATH="$TMP/bin3:$PATH" WB_CONF_PATH="$VSTART_CFG" \
+            WB_HOST_GPU_DIR="$1" WB_HOST_GPU_MANAGED="$1/10-test.conf" \
+            WB_HOST_GPU_MODFILE="$TMP/vs-modlist" VIRSH_CALLS="$TMP/vs-calls" \
+            "$WB_ROOT/scripts/bin/winbox" vm start "${@:2}"; }
+
+# 1) 直通姿态 + 非 root：必须拒绝启动并给出 sudo 命令（复位要写 /sys）
+out=$(vsrun "$TMP/vs-pa" 2>&1); rc=$?
+if (( EUID != 0 )); then
+  if [[ $rc == 3 ]]; then
+    ok '直通姿态下非 root 启动 → 码 3（拒绝）'
+    has '错误信息里给出 sudo 命令' "$out" 'sudo'
+  else
+    bad "期望码 3，实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
+  fi
+else
+  ok '以 root 运行：跳过"非 root 拒绝启动"断言（测试不碰宿主）'
+fi
+
+# 2) --no-reset：显式跳过后应当真的走到 virsh start
+: > "$TMP/vs-calls"
+vsrun "$TMP/vs-pa" --no-reset >/dev/null 2>&1; rc=$?
+[[ $rc == 0 ]] && ok '--no-reset 可以启动（码 0）' || bad "--no-reset 启动失败（码 $rc）"
+check '--no-reset 时确实调用了 virsh start' 0 bash -c "grep -q 'start testvm' '$TMP/vs-calls'"
+out=$(vsrun "$TMP/vs-pa" --no-reset 2>&1)
+has '--no-reset 会明确警告' "$out" '--no-reset'
+
+# 3) 宿主姿态：不需要复位，也不该要求 root
+: > "$TMP/vs-calls"
+out=$(vsrun "$TMP/vs-host" 2>&1); rc=$?
+[[ $rc == 0 ]] && ok '宿主姿态下启动不需要 root（码 0）' || { bad "宿主姿态启动失败（码 $rc）"; printf '%s\n' "$out" | sed 's/^/      /'; }
+has '宿主姿态明确说明无需复位' "$out" '无需复位'
+
+# 干跑不可以声称"已启动/复位完成"（同一类假成功踩过三次，用 wb_ok_real 收口）
+dryout=$(vsrun "$TMP/vs-pa" -n 2>&1)
+lacks '干跑不谎报"已启动"' "$dryout" '已启动'
+lacks '干跑不谎报"复位完成"' "$dryout" '复位完成'
+
+# 4) 干跑不需要 root（只打印计划）
+out=$(vsrun "$TMP/vs-pa" -n 2>&1); rc=$?
+: > /dev/null
+check 'vm start 干跑不需要 root' 0 "$WB_ROOT/scripts/bin/winbox" -n -c "$VSTART_CFG" vm start --no-reset
+
+# 5) 复位函数：跳过时必须返回 1（返回值语义 = 是否真的复位了）
+check '未配置 BDF 时 wb_gpu_reset_cycle 返回 1（未复位）' 1 bash -c "
+  export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$TMP/absent2.conf' WB_RESET_LOG='$TMP/r2.log'
+  source '$WB_ROOT/scripts/lib/gpu.sh'; wb_conf_load
+  wb_gpu_reset_cycle"
+check '非 root 时 wb_gpu_reset_cycle 返回 1（未复位）' 1 bash -c "
+  (( EUID == 0 )) && exit 1
+  export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$VSTART_CFG' WB_RESET_LOG='$TMP/r3.log' WB_GPU_BDF=0000:0d:00.0
+  source '$WB_ROOT/scripts/lib/gpu.sh'; wb_conf_load
+  wb_gpu_reset_cycle"
+
+# 6) 结构守卫：复位的实现位置与调用顺序
+check 'vm start 里调用 wb_gpu_reset_cycle' 0 bash -c "
+  grep -q 'wb_gpu_reset_cycle' '$WB_ROOT/scripts/bin/vmctl'"
+order=$(awk '/^  start\)/{f=1} f&&/wb_gpu_reset_cycle/{print "reset";exit}' "$WB_ROOT/scripts/bin/vmctl"; \
+        awk '/^  start\)/{f=1} f&&/V\[@\]\" start/{print "start";exit}' "$WB_ROOT/scripts/bin/vmctl")
+if [[ $(printf '%s\n' "$order" | head -1) == reset ]]; then
+  ok '复位在 virsh start 之前执行（顺序正确）'
+else
+  bad "顺序不对（先出现：$(printf '%s' "$order" | tr '\n' ' ')）"
+fi
+check '仓库里不再有钩子安装代码（不用 libvirt 钩子）' 0 bash -c "
+  cd '$WB_ROOT' && ! git ls-files | grep -q 'scripts/bin/reset-hook'"
+check '仓库里没有 hooks 目录产物' 0 bash -c "
+  cd '$WB_ROOT' && ! grep -rq 'qemu.d/hooks\|hooks/qemu.d' scripts/"
 
 export PATH=$OLD_PATH
 unset WB_CONF_PATH
@@ -557,7 +637,7 @@ EV="$TMP/ev"
 check 'evidence 采集（非 root 也应当成功）' 0 "$WB_ROOT/scripts/bin/winbox" evidence --out "$EV"
 check 'evidence 产出清单' 0 bash -c "[[ -f '$EV/manifest.txt' ]] && grep -q 'SHA256' '$EV/manifest.txt'"
 check 'evidence 产出关键文件' 0 bash -c "
-  for f in 04-driver-binding.txt 05-iommu.txt 10-kvmfr.txt 11-reset-hook.txt 13-versions.txt 14-guest.txt; do
+  for f in 04-driver-binding.txt 05-iommu.txt 10-kvmfr.txt 11-reset.txt 13-versions.txt 14-guest.txt; do
     [[ -f '$EV/'\$f ]] || { echo \"缺 \$f\"; exit 1; }
   done"
 check 'evidence 不含私钥内容' 0 bash -c "
@@ -937,6 +1017,10 @@ check '绑定失败时有回退（drivers_probe）' 0 bash -c "
 check '绑定带重试（瞬时失败可自愈）' 0 bash -c "
   grep -q 'wb_host_gpu__bind_retry' '$WB_ROOT/scripts/lib/host.sh' && \
   [[ \$(grep -c 'wb_host_gpu__bind_retry' '$WB_ROOT/scripts/lib/host.sh') -ge 3 ]]"
+
+check '声称"状态已改变"的打勾走 wb_ok_real（干跑不谎报）' 0 bash -c "
+  cd '$WB_ROOT'
+  ! grep -nE 'wb_run .*(start|snapshot|eject|rollback|usermod)' scripts/bin/* | grep -q 'wb_ok '"
 
 printf '\n== 23. 仓库根入口 winbox ==\n'
 check '根入口存在且有可执行位' 0 bash -c "[[ -x '$WB_ROOT/winbox' ]]"

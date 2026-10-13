@@ -172,7 +172,7 @@ wb_hint "1. 启动:      winbox vm start"
 wb_hint "2. 打开控制台: winbox vm console（或 viewer）—— 初始是 QXL+SPICE，装系统时看得见"
 wb_hint '3. 客机内：装 Windows（SATA + e1000e 免驱）→ 装 AMD 离线驱动 → 装 Looking Glass IDD'
 wb_hint '4. 装完回到宿主：winbox gpu-attach --rom <VBIOS> --audio-rom <GOP> --mode lg'
-wb_hint "   然后 sudo winbox lg-shmem && sudo winbox reset-hook install"
+wb_hint '   然后 sudo winbox lg-shmem（复位不用管：winbox vm start 会在启动前自动做）'
 if wb_is_dry_run; then
   wb_log ''
   wb_log '（--dry-run：以上步骤均未真正执行）'

@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 探测与宿主准备 | `winbox detect` / `host-prep` | [01-detect-and-host-prep.md](01-detect-and-host-prep.md) |
 | 建机与直通挂载 | `winbox vm-create` / `gpu-attach` | [02-create-and-attach.md](02-create-and-attach.md) |
-| 启动与复位轮回 | `vmctl start`（经 libvirt 钩子） | [03-vm-start-and-reset-hook.md](03-vm-start-and-reset-hook.md) |
+| 启动与复位轮回 | `vmctl start`（复位是前置步骤，不用钩子） | [03-vm-start-and-reset.md](03-vm-start-and-reset.md) |
 | Looking Glass 全链 | `winbox lg-prepare` / `lg-shmem` / `lg` | [04-lg-chain.md](04-lg-chain.md) |
 | 自检与取证 | `winbox status` / `evidence` | [05-status-and-evidence.md](05-status-and-evidence.md) |
 | ROM 处理（C） | `winbox rom …` → `romtool` | [06-romtool.md](06-romtool.md) |

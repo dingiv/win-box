@@ -240,7 +240,7 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
    ＋ `vfio_pci` 在开机模块表里（早于 amdgpu 执行）。两者配合在 initramfs 阶段就完成抢占，
    之后 amdgpu 根本没机会绑定 —— 这就是整个直通姿态的机制。
 2. **`blacklist amdgpu` 是装饰**（实测）：
-   * 拦不住显式 modprobe —— `modprobe -n -v amdgpu` 照样把依赖链全解析出来（复位钩子正靠这点）；
+   * 拦不住显式 modprobe —— `modprobe -n -v amdgpu` 照样把依赖链全解析出来（核显复位正靠这点）；
    * 它对 alias 自动加载确实有效，但那一层本来多余 —— 设备早已被 vfio-pci 认领。
    实测佐证：本机在**完全没有黑名单**的情况下直通照常工作（`mode=passthrough`、核显绑 vfio-pci）。
    因此本工具不再管理它；别人文件里若有，也不当冲突报（只在 detail 里如实标注"存在但无作用"）。

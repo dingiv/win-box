@@ -33,8 +33,8 @@ sudo ./winbox host-prep     # deps / vfio / initramfs / kernel params (reboot ma
 sudo ./winbox gpu-attach    # attach the iGPU (ROM + dedicated root port + display mode)
 sudo ./winbox lg-prepare    # KVMFR module + build the Looking Glass client
 sudo ./winbox lg-shmem      # shared memory device + the two permission gates
-sudo ./winbox reset-hook install
-./winbox vm start && ./winbox lg
+sudo ./winbox vm start      # carries the iGPU reset (MODE2) before booting
+./winbox lg                 # open the Looking Glass window
 ```
 
 Everyday use:

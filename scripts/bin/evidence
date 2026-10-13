@@ -177,14 +177,14 @@ collect_shell 09-virsh-version.txt 'virsh --version; echo; qemu-system-x86_64 --
 } > "$OUT/10-kvmfr.txt" && wb_ok 10-kvmfr.txt
 
 {
-  printf '# 复位轮回日志\n# 时间: %s\n\n' "$(date '+%F %T')"
+  printf '# 复位轮回日志（winbox vm start 每次启动前会写这里）\n# 时间: %s\n\n' "$(date '+%F %T')"
   log=${WB_RESET_LOG:-/var/log/winbox-reset.log}
   printf '日志: %s\n\n' "$log"
   if [[ -r $log ]]; then tail -n 120 "$log"; else echo '(读不到：需要 root 或尚未产生)'; fi
   echo
   echo '--- dmesg: 复位相关 ---'
   dmesg 2>/dev/null | grep -iE 'MODE2 reset|finishing device|vfio|amdgpu' | tail -40 || echo '(需要 root)'
-} > "$OUT/11-reset-hook.txt" && wb_ok 11-reset-hook.txt
+} > "$OUT/11-reset.txt" && wb_ok 11-reset.txt
 
 # ── 6. 内核消息 ───────────────────────────────────────────────────────────
 {
