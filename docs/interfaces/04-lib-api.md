@@ -203,12 +203,25 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 
 在「直通姿态」与「宿主姿态」之间切换，并让判定可复现。
 
+**姿态定义**（只看持久化配置，不看"此刻绑在哪个驱动"）：
+
+| 姿态 | 判据 |
+| --- | --- |
+| `passthrough` | 存在 `options vfio-pci ids=…`（真正认领设备的那一行），且开机模块表里没有 amdgpu |
+| `host` | 没有 `ids=` |
+| `mixed` | 有 `ids=` **但**开机模块表里还有 amdgpu（一边要抢占、一边要早期加载，结果取决于顺序 —— 脆弱，要出声） |
+
+> `blacklist amdgpu` **不参与判定**，本工具也不再写它、不再删它、不再把它当冲突报。
+> 见下面第 2 条事实。
+
 | 函数 | 语义 |
 | --- | --- |
-| `wb_host_gpu_detect` | stdout = `passthrough` / `host` / `mixed`（**只看持久化配置**，不看当前绑定） |
-| `wb_host_gpu_blacklisted` / `wb_host_gpu_has_vfio_ids` / `wb_host_gpu_has_softdep` | 0/1 查询（只认**非注释**行） |
+| `wb_host_gpu_detect` | stdout = `passthrough` / `host` / `mixed` |
+| `wb_host_gpu_has_vfio_ids` / `wb_host_gpu_has_softdep` | 0/1 查询（只认**非注释**行） |
+| `wb_host_gpu_amdgpu_in_bootlist` / `wb_host_gpu_vfio_in_bootlist` | 开机模块表（`/etc/initramfs-tools/modules`）里是否有**未注释**的对应模块 |
+| `wb_host_gpu_blacklisted` | 0/1，**仅记录用**（不参与判定） |
 | `wb_host_gpu_detail` | stdout = `key=value` 多行（供 `status`/`evidence` 用） |
-| `wb_host_gpu_conflicts` | stdout = `文件:行号:内容`——**我们管的文件之外**的直通配置 |
+| `wb_host_gpu_conflicts` | stdout = `文件:行号:内容`——**我们管的文件之外**的**真有效**配置（`ids=` / `softdep` 两类；黑名单不算） |
 | `wb_host_gpu_amdgpu_in_use` | 0/1：核显**自己的** DRM 卡有已连接输出，或有进程打开它的设备节点 |
 | `wb_host_gpu_vm_running` | 0/1 |
 | `wb_host_gpu_config_passthrough` | 持久化写直通姿态；返回 **0 = 有改动 / 1 = 无需改动 / ≥2 = 失败** |
@@ -216,14 +229,20 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `wb_host_gpu_clean_conflicts` | 注释冲突行（改前备份、逐条打印、带标记） |
 | `wb_host_gpu_live_passthrough` / `wb_host_gpu_live_host` | 当前会话的绑定切换（需 root） |
 
-**三条实测事实**（决定"开关"必须动哪些东西，漏一个就表现为"改了却没生效"）：
+**三条实测事实**（决定"开关"该动哪一层，动错了就表现为"改了却没生效"）：
 
-1. **只删黑名单不够**：`options vfio-pci ids=` 会让 vfio-pci 在启动早期就把核显抢走
-   （`vfio_pci` 在 initramfs 里，早于 amdgpu）→ 必须同时清掉 `ids=` 与 `softdep`。
-2. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
+1. **真正起作用的是"谁在开机阶段先把设备认领走"**：`options vfio-pci ids=…`（认领）
+   ＋ `vfio_pci` 在开机模块表里（早于 amdgpu 执行）。两者配合在 initramfs 阶段就完成抢占，
+   之后 amdgpu 根本没机会绑定 —— 这就是整个直通姿态的机制。
+2. **`blacklist amdgpu` 是装饰**（实测）：
+   * 拦不住显式 modprobe —— `modprobe -n -v amdgpu` 照样把依赖链全解析出来（复位钩子正靠这点）；
+   * 它对 alias 自动加载确实有效，但那一层本来多余 —— 设备早已被 vfio-pci 认领。
+   实测佐证：本机在**完全没有黑名单**的情况下直通照常工作（`mode=passthrough`、核显绑 vfio-pci）。
+   因此本工具不再管理它；别人文件里若有，也不当冲突报（只在 detail 里如实标注"存在但无作用"）。
+3. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
    因此**两个方向都可能"需要重启才完全生效"**（码 5）。
-3. **内核参数不用动**：`video=efifb:off` / `initcall_blacklist=sysfb_init` 只关掉简单 framebuffer
-   （正是为了让 amdgpu 干净接管），**不影响 amdgpu 工作**。
+   内核参数（`video=efifb:off` / `initcall_blacklist=sysfb_init`）**不用动**：
+   它们只关掉简单 framebuffer（正是为了让 amdgpu 干净接管），不影响 amdgpu 工作。
 
 **可测性**：`WB_HOST_GPU_DIR` / `WB_HOST_GPU_MANAGED` / `WB_HOST_GPU_MODFILE` / `WB_HOST_GPU_LOADFILE`
 均可覆盖 → 冒烟测试用样本目录离线验证判定与冲突检测，不碰真实 `/etc`。

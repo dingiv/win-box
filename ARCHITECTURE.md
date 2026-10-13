@@ -93,7 +93,7 @@ winbox vm start
    → source scripts/lib/*.sh; wb_gpu_reset_cycle; exit 0
         ├─ 写 driver_override = amdgpu      ← 必须先写，否则 vfio-pci 凭 ids= 抢回
         ├─ 解绑当前驱动
-        ├─ modprobe amdgpu                  ← 必须自己加载（它被黑名单挡着）
+        ├─ modprobe amdgpu                  ← 必须自己加载（宿主不会自动加载它：设备被 vfio-pci 认领）
         ├─ 写 drivers_probe                 ← 必须显式，unbind 后内核不会自动 probe
         ├─ 等 amdgpu 完成初始化（默认 30s）
         ├─ 解绑 amdgpu → 内核执行 MODE2 reset
@@ -111,7 +111,7 @@ winbox vm start
 ```
                  ┌──────────────────────────────────────────┐
                  │                                          │
-        host-prep│                                          │ 开机（黑名单生效则停在这里）
+        host-prep│                                          │ 开机（设备被 vfio-pci 认领则停在这里）
                  ▼                                          │
             ┌─────────┐   内核 udev 自动绑定   ┌──────────┐   │
             │ (none)  │◄──────────────────── │ amdgpu   │───┘
@@ -136,15 +136,17 @@ winbox vm start
 
 ```
 passthrough（直通姿态，默认）                     host（宿主姿态）
-  modprobe.d: ids= + softdep + 黑名单              以上全部撤掉
-  initramfs : amdgpu 已移除、vfio 三件套在         重建 initramfs
+  modprobe.d: options vfio-pci ids= + softdep      以上全部撤掉
+              ← 这行才是"认领设备"，是整个机制的核心
+  initramfs : amdgpu 不在模块表、vfio 三件套在      重建 initramfs
   当前会话  : 核显绑在 vfio-pci                     核显绑在 amdgpu
        │                                                │
        └──────────── winbox host-gpu host ──────────────┘
        ◄─────────── winbox host-gpu passthrough ────────┘
 
 两个方向都可能"需要重启才完全生效"（modprobe.d 会被打进 initramfs）→ 以码 5 收尾。
-判定只看持久化配置：黑名单与 ids= 只存在一个时是 mixed（语义不完整，status 会报）。
+判定只看持久化配置：有 ids= 即直通；"ids= 与开机模块表里的 amdgpu 并存"才算 mixed。
+blacklist amdgpu 不参与判定（拦不住显式 modprobe，且设备已被认领）。
 ```
 
 为什么需要它：调试"到底是哪一层在挡"（把 amdgpu 还回去看核显本身是否正常）、

@@ -63,7 +63,8 @@ winbox host-prep()
         ★ softdep 的作用：让 vfio-pci 在 amdgpu 之前拿到设备（否则驱动抢占）
     wb_step 4/6 initramfs
         从 /etc/initramfs-tools/modules 删除 amdgpu 行
-        ★ 关键：blacklist 只挡 alias 自动加载，挡不住这里写的显式 modprobe
+        ★ 关键：blacklist 只挡 alias 自动加载，挡不住这里写的显式 modprobe；
+          真正让宿主拿不到核显的是 `options vfio-pci ids=` 的"抢先认领"（配合 vfio_pci 在此表里）
         ★ 顺带清理: 只保留真的需要的模块，减小 initramfs（便于观察是否生效）
         wb_run update-initramfs -u -k all
     wb_step 5/6 内核参数

@@ -72,7 +72,7 @@ winbox [全局选项] <command> [command 选项]
 #### `winbox host-prep [--skip-deps]`
 
 - **输入**：`--skip-deps` 跳过 apt 安装（只做 vfio/initramfs/内核参数/用户组）
-- **输出**：六步——依赖 → libvirtd 与默认网络/存储池 → vfio 模块配置（`ids=` + `softdep` + 黑名单）→
+- **输出**：六步——依赖 → libvirtd 与默认网络/存储池 → vfio 模块配置（`ids=` + `softdep`）→
   initramfs 模块表（把 amdgpu 拿掉、把 vfio 四件套补齐）→ 内核参数（IOMMU + 关宿主 framebuffer）→ 用户组
 - **失败**：码 3 = 非 root（除非 `--dry-run`）/ 缺 dpkg·apt-get·update-initramfs / 读不到核显 ID；
   码 1 = apt·update-initramfs·update-grub 失败；**码 5 = 改动涉及内核参数或 initramfs，必须重启宿主**
@@ -150,13 +150,18 @@ winbox [全局选项] <command> [command 选项]
 
 | 姿态 | `/etc/modprobe.d` | initramfs | 核显驱动 |
 | --- | --- | --- | --- |
-| `passthrough` | `options vfio-pci ids=…` + `softdep amdgpu pre: vfio-pci` + 黑名单 | amdgpu 已移除、vfio 三件套在 | `vfio-pci` |
-| `host` | 以上全部撤掉 | 重建（否则早期启动仍按旧 modprobe.d 挡 amdgpu） | `amdgpu` |
-| `mixed` | 只有其中一项 | — | 视情况 —— **语义不完整**，`status` 会报 bad |
+| `passthrough` | `options vfio-pci ids=…` + `softdep amdgpu pre: vfio-pci`（**认领设备的就是这一行**） | amdgpu 不在、vfio 三件套在 | `vfio-pci` |
+| `host` | 以上撤掉 | 重建（否则早期启动仍按旧 modprobe.d 走） | `amdgpu` |
+| `mixed` | 有 `ids=`，但开机模块表里还有 amdgpu | 矛盾：一边抢占一边要早期加载 | 视加载顺序 —— `status` 报 bad |
+
+`blacklist amdgpu` **不参与判定**：实测它拦不住显式 `modprobe`，且设备早被 vfio-pci 认领，
+所以有它没它都能直通（本机就是在完全没有黑名单的情况下跑通的）。本命令不再写它、
+不再删它、也不把它当冲突报；`status` 只在 detail 里标注"存在但无作用"。
 
 - **输入**：动作（默认 `status`）；`--takeover` = 把**别人文件里**的直通配置注释掉（改前备份 + 逐条打印，带
-  `# win-box host-gpu --takeover:` 标记）
-- **输出**：`status` 打印 `mode / desired / blacklisted / vfio_ids / softdep / driver / amdgpu_loaded / framebuffer_in_use`；
+  `# win-box host-gpu --takeover:` 标记）。**只覆盖两类真有效的配置**：`options vfio-pci … ids=`
+  与 `softdep amdgpu pre: …`（黑名单不在此列）
+- **输出**：`status` 打印 `mode / desired / vfio_ids / softdep / blacklisted（仅记录）/ bootlist_amdgpu / bootlist_vfio / driver / amdgpu_loaded / framebuffer_in_use`；
   切换做两件事：**持久化配置**（modprobe.d + initramfs）与**立即生效**（当前会话的绑定）
 - **失败**：码 2 = 动作非法；码 3 = 非 root（真跑）/ VM 正在运行 / 有冲突而未给 `--takeover` / 未配置 BDF；
   **码 5 = 持久化有改动（需要重启）**，或用户在"核显正被宿主使用"的确认处取消

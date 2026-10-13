@@ -8,6 +8,20 @@
 set -uo pipefail
 
 WB_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+# ── 安全约束：本测试套件**绝不修改宿主** ──────────────────────────────────
+# 所有会改 /etc 或 /sys 的命令，只允许以下三种方式出现在测试里：
+#   1) 干跑（-n / --dry-run）
+#   2) 夹具驱动（WB_HOST_GPU_DIR / WB_HOOK_ROOT / 隔离配置 / 假 virsh）
+#   3) 断言"非 root 时被拒绝（码 3）"—— 这种断言**以 root 跑时必须跳过**，
+#      否则它会真的执行（踩过：host-prep 会改 modprobe.d、initramfs、GRUB）
+check_nonroot_only() {
+  if (( EUID == 0 )); then
+    ok "${1}（以 root 运行：跳过——测试不碰宿主）"
+    return 0
+  fi
+  check "$@"
+}
 PASS=0; FAIL=0
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
@@ -585,7 +599,7 @@ else
   ok '本机无 AMD 核显：跳过 initramfs 断言'
 fi
 has 'host-prep 检查内核参数' "$out" '内核参数'
-check 'host-prep 真跑需要 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-prep
+check_nonroot_only 'host-prep 真跑需要 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-prep
 
 # 21.2 vm-create 拒绝重名（假 virsh 把"已存在"变成确定条件，离线可测）
 mkdir -p "$TMP/bin2"
@@ -655,7 +669,7 @@ mkfix "$TMP/hg-pa"  'options vfio-pci ids=1002:13c0,1002:1640' 'blacklist amdgpu
 mkfix "$TMP/hg-ho"  '# 什么也没配' 'options snd_hda_intel dmic_detect=1'
 mkfix "$TMP/hg-mx1" 'blacklist amdgpu'
 mkfix "$TMP/hg-mx2" 'options vfio-pci ids=1002:13c0'
-printf '%s\n' 'blacklist amdgpu' > "$TMP/hg-pa/20-other.conf"
+printf '%s\n' 'options vfio-pci ids=1002:13c0' > "$TMP/hg-pa/20-other.conf"
 
 hg() { env WB_HOST_GPU_DIR="$1" WB_HOST_GPU_MANAGED="$1/10-test.conf" bash -c "
   export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; shift; \"\$@\"" _ "${@:2}"; }
@@ -664,12 +678,19 @@ check '黑名单 + vfio ids 同时存在 → passthrough' 0 bash -c "
   [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-pa' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == passthrough ]]"
 check '两者都不存在 → host' 0 bash -c "
   [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-ho' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == host ]]"
-check '只有黑名单 → mixed（语义不完整）' 0 bash -c "
-  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx1' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == mixed ]]"
-check '只有 vfio ids → mixed' 0 bash -c "
-  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx2' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == mixed ]]"
+# 黑名单**不参与判定**：它拦不住显式 modprobe，也拦不住已认领设备的 vfio-pci
+check '只有黑名单（无 ids=）→ host（黑名单不算姿态）' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx1' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == host ]]"
+check '有 vfio ids= → passthrough（这才是真正认领设备的配置）' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx2' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == passthrough ]]"
 
-# 冲突检测：排在"我们管的文件"之外的同类配置要被指出来（带文件与行号）
+# ids= 与开机模块表互相矛盾（一边要抢占、一边要早期加载 amdgpu）→ mixed
+printf '%s\n' 'amdgpu' > "$TMP/hg-modlist"
+check 'ids= 与开机模块表冲突 → mixed' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-pa' WB_HOST_GPU_MODFILE='$TMP/hg-modlist' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == mixed ]]"
+
+# 冲突检测：排在"我们管的文件"之外的**真有效**配置要被指出来（带文件与行号）
+# 注意：blacklist amdgpu **不算冲突**（无作用）
 out=$(env WB_HOST_GPU_DIR="$TMP/hg-pa" WB_HOST_GPU_MANAGED="$TMP/hg-pa/10-test.conf" bash -c "
   export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_conflicts")
 has '冲突检测指出别人的文件' "$out" '20-other.conf:1'
@@ -707,12 +728,12 @@ out=$("$WB_ROOT/scripts/bin/winbox" host-gpu status 2>&1)
 has 'host-gpu status 报出姿态' "$out" 'mode'
 has 'host-gpu status 报出核显驱动' "$out" 'driver'
 check '未知动作 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" host-gpu nonsense
-check '真跑需 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
+check_nonroot_only '真跑需 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
 # 命令层的冲突处理：用**夹具目录**驱动（不读本机 /etc、不依赖本机配置）
 HGC="$TMP/hg-cmd"
 mkdir -p "$HGC"
-printf '%s\n' 'blacklist amdgpu' 'options vfio-pci ids=1002:13c0' > "$HGC/10-test.conf"
-printf '%s\n' 'blacklist amdgpu' > "$HGC/20-other.conf"
+printf '%s\n' 'options vfio-pci ids=1002:13c0' 'softdep amdgpu pre: vfio-pci' > "$HGC/10-test.conf"
+printf '%s\n' 'blacklist amdgpu' 'options vfio-pci ids=1002:13c0' > "$HGC/20-other.conf"
 hg_cmd() { env WB_CONF_PATH="$TMP/render.conf" WB_GPU_BDF=0000:01:00.0 WB_AUDIO_BDF=0000:01:00.1 \
              WB_HOST_GPU_DIR="$HGC" WB_HOST_GPU_MANAGED="$HGC/10-test.conf" \
              WB_HOST_GPU_MODFILE="$HGC/modules" WB_HOST_GPU_LOADFILE="$HGC/load.conf" \
@@ -727,12 +748,18 @@ fi
 check '带 --takeover 的干跑可以走完（仍不落盘）' 0 hg_cmd -n host-gpu host --takeover
 fixture_lines=$(wc -l < "$HGC/10-test.conf")
 fixture_other=$(tr -d '\n' < "$HGC/20-other.conf")
-if [[ $fixture_lines == 2 && $fixture_other == 'blacklist amdgpu' ]]; then
+if [[ $fixture_lines == 2 && $fixture_other == 'blacklist amdgpuoptions vfio-pci ids=1002:13c0' ]]; then
   ok '夹具里的文件一个没被改动（干跑不落盘）'
 else
   bad "干跑改动了夹具文件（行数=$fixture_lines，另一个=$fixture_other）"
 fi
 
+
+# 回归断言：会改宿主的命令不许用裸 check（见文件头的安全约束）
+check '会改宿主的命令都走了 root 守卫' 0 bash -c "
+  cd '$WB_ROOT'
+  # 裸 check 直接调 host-prep / host-gpu <动作>（没用 -n 也没用夹具）→ 视为违规
+  ! grep -nE '^check .*winbox\\\" (host-prep|host-gpu (passthrough|host))' tests/smoke.sh"
 
 printf '\n== 24. 没有配置时的健壮性（陌生人 clone 后的第一分钟）==\n'
 # 克隆体里没有 config/win-box.conf（它被 gitignore）：任何命令都不该出现

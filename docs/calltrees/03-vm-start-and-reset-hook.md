@@ -24,7 +24,8 @@ vmctl start win11()
     │    ★ 必须先写 driver_override：否则 vfio-pci 会凭 ids= 瞬间抢回     │
     │    if drv != (none): wb_pci_unbind(GPU)                            │
     │    ["modprobe amdgpu"]                                             │
-    │    ★ 必须自己 modprobe：amdgpu 被我们列入黑名单，开机不会自动加载   │
+    │    ★ 必须自己 modprobe：宿主不会自动加载它（设备被 vfio-pci 认领） │
+    │      （黑名单只是补充，而且拦不住显式 modprobe —— 实测）              │
     │      —— 冷启动后的第一次启动最容易漏掉这一步（实测踩过）           │
     │    wb_pci_probe(GPU)                                               │
     │    ★ 必须显式写 drivers_probe：unbind 后内核不会自动重新探测        │

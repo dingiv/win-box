@@ -14,12 +14,18 @@
 #     上述配置全部撤掉；amdgpu 可正常加载；核显交回宿主
 #     → 用于把核显还给宿主（编码 / 多屏 / 调试），或验证"到底是哪一层在挡"
 #
-# 三个事实（决定了"开关"必须动哪些东西，漏一个就表现为"改了却没生效"）：
-#   1. 只删黑名单**不够**：`options vfio-pci ids=` 会让 vfio-pci 启动早期就把核显抢走
-#      （vfio_pci 在 initramfs 里，早于 amdgpu）→ 必须同时清掉 ids= 与 softdep。
-#   2. modprobe.d 会被**打进 initramfs**：改完必须 update-initramfs；否则早期启动仍按旧配置走。
-#      因此在两个方向上都可能"需要重启才完全生效"。
-#   3. 内核参数（video=efifb:off / initcall_blacklist=sysfb_init）**不用动**：
+# 三个实测事实（决定了"开关"该动哪一层，动错了就表现为"改了却没生效"）：
+#
+#   1. **真正起作用的是"谁在开机阶段先把设备认领走"**：
+#        `options vfio-pci ids=…`（认领）+ vfio_pci 在开机模块表里（早于 amdgpu 执行）
+#      两者配合，在 initramfs 阶段就完成抢占；之后 amdgpu 根本没机会绑定。
+#   2. **`blacklist amdgpu` 是装饰**（本工具不再管理它，也不再把它当冲突报）：
+#        - 拦不住显式 modprobe：`modprobe amdgpu` 照样把依赖链解析出来（复位钩子就靠这个）
+#        - 它对 alias 自动加载确实有效，但那一层本来就是多余的——设备早被 vfio-pci 占住了
+#      所以"黑名单在不在"与"能不能直通"无关；留着无害，只在 detail 里如实报出。
+#   3. **modprobe.d 会被打进 initramfs**：改完必须 update-initramfs，否则早期启动仍按旧配置走。
+#      因此两个方向都可能"需要重启才完全生效"。
+#      内核参数（video=efifb:off / initcall_blacklist=sysfb_init）**不用动**：
 #      它们只关掉简单 framebuffer（正是为了让 amdgpu 干净接管），不影响 amdgpu 工作。
 #
 # 所有函数都可单独调用（场景 4）。检测类函数只读，切换类函数受 --dry-run 控制。
@@ -86,17 +92,29 @@ wb_host_gpu_has_softdep() {
   return 1
 }
 
+# 开机模块表里是否有**未注释**的 amdgpu（有 = 早期会加载它，与 ids= 抢占相互矛盾）
+wb_host_gpu_amdgpu_in_bootlist() {
+  [[ -r $WB_HOST_GPU_MODFILE ]] || return 1
+  grep -qE '^[[:space:]]*amdgpu[[:space:]]*$' "$WB_HOST_GPU_MODFILE"
+}
+
+# 开机模块表里是否有**未注释**的 vfio_pci（有 = 早期就能抢占）
+wb_host_gpu_vfio_in_bootlist() {
+  [[ -r $WB_HOST_GPU_MODFILE ]] || return 1
+  grep -qE '^[[:space:]]*vfio_pci[[:space:]]*$' "$WB_HOST_GPU_MODFILE"
+}
+
 # 结论：passthrough | host | mixed
-#   判定只看**持久化配置**（黑名单 + ids=），不看当前绑定状态 ——
-#   因为"配置是直通、但刚切完还没重启"是真实存在的中间态，那属于 detail 要显示的信息，
-#   不该让结论本身摇罢不定。
+#   判定只看**持久化配置**，不看当前绑定状态 —— "刚切完还没重启"是真实存在的中间态，
+#   那属于 detail 要显示的信息，不该让结论本身摇摆。
+#
+#   规则的根据（第 1 条事实）：`options vfio-pci ids=` 是**真正认领设备**的那一方，
+#   所以它存在就是直通姿态。唯一称得上矛盾的是"既要抢占(ids=) 又要早期加载 amdgpu
+#   (开机模块表里有 amdgpu)"——那取决于加载顺序，脆弱，判为 mixed 并出声。
+#   黑名单**不参与判定**（它拦不住显式 modprobe，也拦不住已经认领设备的 vfio-pci）。
 wb_host_gpu_detect() {
-  local bl=0 ids=0
-  wb_host_gpu_blacklisted && bl=1
-  wb_host_gpu_has_vfio_ids && ids=1
-  if (( bl && ids )); then printf 'passthrough\n'
-  elif (( !bl && !ids )); then printf 'host\n'
-  else printf 'mixed\n'; fi
+  wb_host_gpu_has_vfio_ids || { printf 'host\n'; return 0; }
+  if wb_host_gpu_amdgpu_in_bootlist; then printf 'mixed\n'; else printf 'passthrough\n'; fi
 }
 
 # 人类/机器可读的细节（供 status 与 evidence 用）
@@ -110,9 +128,11 @@ wb_host_gpu_detail() {
   wb_host_gpu_has_softdep && sd=yes || sd=no
   printf 'mode=%s\n' "$(wb_host_gpu_detect)"
   printf 'desired=%s\n' "$(wb_conf_get_default WB_HOST_GPU_MODE '')"
-  printf 'blacklisted=%s\n' "$bl"
   printf 'vfio_ids=%s\n' "$ids"
   printf 'softdep=%s\n' "$sd"
+  printf 'blacklisted=%s\n' "$bl（仅记录：拦不住显式 modprobe，且设备已被 vfio-pci 认领，无实际作用）"
+  printf 'bootlist_amdgpu=%s\n' "$(wb_host_gpu_amdgpu_in_bootlist && echo yes || echo no)"
+  printf 'bootlist_vfio=%s\n' "$(wb_host_gpu_vfio_in_bootlist && echo yes || echo no)"
   printf 'driver=%s\n' "$drv"
   printf 'amdgpu_loaded=%s\n' "$(lsmod 2>/dev/null | grep -q '^amdgpu' && echo yes || echo no)"
   printf 'framebuffer_in_use=%s\n' "$(wb_host_gpu_amdgpu_in_use && echo yes || echo no)"
@@ -125,7 +145,9 @@ wb_host_gpu_conflicts() {
   for f in "$WB_HOST_GPU_DIR"/*.conf "$WB_HOST_GPU_DIR"/*.conf.disabled; do
     [[ -f $f ]] || continue
     [[ $(readlink -f "$f" 2>/dev/null || printf '%s' "$f") == "$managed_real" ]] && continue
-    grep -nE '^[[:space:]]*(blacklist[[:space:]]+amdgpu([[:space:]]|$)|options[[:space:]]+vfio-pci[[:space:]].*ids=|softdep[[:space:]]+amdgpu[[:space:]]+pre:)' \
+    # 只报**真正有效**的两类：谁认领设备（ids=）与加载顺序（softdep）。
+    # blacklist amdgpu 不算冲突 —— 它拦不住显式 modprobe，结局由谁先认领决定。
+    grep -nE '^[[:space:]]*(options[[:space:]]+vfio-pci[[:space:]].*ids=|softdep[[:space:]]+amdgpu[[:space:]]+pre:)' \
       "$f" 2>/dev/null | sed "s|^|$f:|"
   done
   return 0
@@ -240,14 +262,11 @@ wb_host_gpu_config_passthrough() {
   ids=$(wb_host_gpu__ids) || rc=$?
   if (( rc != 0 )); then return "$rc"; fi
 
+  # 认领设备的那一行（真正起作用的配置）+ 加载顺序。不再写 blacklist —— 它无作用，
+  # 写进来只会让人误以为它是关键（实测：`modprobe amdgpu` 照样能加载）。
   want="options vfio-pci ids=$ids
 softdep amdgpu pre: vfio-pci
 softdep snd_hda_intel pre: vfio-pci"
-  if ! wb_host_gpu_blacklisted; then
-    want+="
-# win-box：核显交给 vfio-pci，宿主不加载 amdgpu（要还给宿主用 winbox host-gpu host）
-blacklist amdgpu"
-  fi
 
   current=$(cat "$WB_HOST_GPU_MANAGED" 2>/dev/null || true)
   if [[ $current == "$want" ]]; then
@@ -337,7 +356,7 @@ wb_host_gpu_clean_conflicts() {
       cp -a "$f" "${f}.bak.$(date +%Y%m%d%H%M%S)"
       last_backed=$f
     fi
-    sed -i -E 's|^([[:space:]]*)(blacklist[[:space:]]+amdgpu([[:space:]]|$))|# win-box host-gpu --takeover: \1\2|; s|^([[:space:]]*)(options[[:space:]]+vfio-pci[[:space:]].*ids=.*)$|# win-box host-gpu --takeover: \1\2|; s|^([[:space:]]*)(softdep[[:space:]]+amdgpu[[:space:]]+pre:.*)$|# win-box host-gpu --takeover: \1\2|' "$f"
+    sed -i -E 's|^([[:space:]]*)(options[[:space:]]+vfio-pci[[:space:]].*ids=.*)$|# win-box host-gpu --takeover: \1\2|; s|^([[:space:]]*)(softdep[[:space:]]+amdgpu[[:space:]]+pre:.*)$|# win-box host-gpu --takeover: \1\2|' "$f"
     wb_ok "已停用 $f 第 ${rest%%:*} 行（备份 ${f}.bak.*）"
   done <<< "$(wb_host_gpu_conflicts)"
   return 0
