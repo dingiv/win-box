@@ -1,0 +1,37 @@
+# 运行产物：不进仓库
+logs/
+*.log
+
+# 虚拟机与安装介质
+*.iso
+*.qcow2
+*.img
+
+# 固件 / ROM / BIOS dump
+# AMD 与主板厂商版权，且与具体机器绑定；请在自己的机器上用 winbox detect + romtool 提取
+*.rom
+*.bin
+*.CAP
+bios_dump/
+
+# 厂商安装包：体积大、许可不允许再分发
+*.exe
+*.msi
+*.zip
+
+# 本机配置（由 winbox detect --write 生成，含本机 BDF 与路径）
+config/win-box.conf
+config/*.bak
+config/*.tmp
+
+# C 构建产物
+src/**/*.o
+src/**/romtool
+
+# 编辑器
+*~
+*.swp
+
+# Python 缓存（本项目不使用 Python，防止遗留）
+__pycache__/
+*.pyc

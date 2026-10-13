@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox conf 实现（scripts/bin/conf）
+#
+# 契约：docs/interfaces/01-winbox-cli.md
+#
+# 用法：
+#   winbox conf                  # 全键 + 来源
+#   winbox conf --json           # 机器可读
+#   winbox conf WB_VM_NAME       # 单个键（未定义 → 码 3）
+#   winbox conf WB_VM_NAME=foo   # 写入（原子写 + 备份）
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+
+wb_conf_load
+
+case ${1:-dump} in
+  dump | "")   wb_conf_dump ;;
+  --json)      wb_conf_dump --json ;;
+  --path)      wb_conf_path ;;
+  -h | --help)
+    sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *=*)         wb_conf_set "${1%%=*}" "${1#*=}" ;;
+  *)
+    [[ $# -eq 1 ]] || wb_fail 2 conf "用法: winbox conf [KEY | KEY=VALUE | --json | --path]" "winbox --help"
+    # 单键查询：直接输出值（stdout 只有结果，可被 $( ) 捕获）
+    wb_conf_get "$1"
+    ;;
+esac

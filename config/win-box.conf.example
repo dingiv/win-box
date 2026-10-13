@@ -1,0 +1,45 @@
+# win-box 配置
+#
+# 由 `winbox detect --write` 自动生成；也可以手工复制本文件为 config/win-box.conf 后编辑。
+#
+# 规则：
+#   * 格式为简单 KEY=VALUE，值里不要有空格（空格请用下划线或去掉）
+#   * 空值 = 未设置，会回落到内置默认值
+#   * 优先级：命令行 > 环境变量（同名 WB_*） > 本文件 > 内置默认
+#   * 本文件（win-box.conf）已被 .gitignore 忽略——它机器相关，不进版本库
+
+# ── 虚拟机 ────────────────────────────────────────────────────────────────
+WB_VM_NAME=win11
+
+# ── 核显的 PCI 地址（detect 自动探测；多显卡机器请手工确认）────────────────
+# VGA 功能与其同槽的 HDMI 音频功能，例如 0000:0d:00.0 / 0000:0d:00.1
+WB_GPU_BDF=0000:0d:00.0
+WB_AUDIO_BDF=0000:0d:00.1
+
+# vendor:device，用于 vfio-pci 的 ids= 与 ROM 校验
+WB_GPU_ID=1002:13c0
+WB_AUDIO_ID=1002:1640
+
+# 核显所在 IOMMU 分组（共享分组时需要额外处理 ACS）
+WB_IOMMU_GROUP=
+
+# ── ROM 部署 ──────────────────────────────────────────────────────────────
+# 只有 libvirt-qemu 需要读它；不要放在 /mnt 等挂载点上（权限与 AppArmor 都会碍事）
+WB_VBIOS_DIR=/var/lib/libvirt/vbios
+WB_VBIOS_GPU=vbios_gpu.rom
+WB_VBIOS_AUDIO=vbios_audio.rom
+
+# ── Looking Glass ─────────────────────────────────────────────────────────
+# 共享内存大小：1080p→32，1440p→64，4K→128
+WB_SHM_SIZE_MB=128
+# 第三方源码 submodule（相对仓库根）；客户端构建产物
+WB_LG_SRC=third_party/LookingGlass
+WB_LG_CLIENT=/home/你的用户名/.local/bin/looking-glass-client
+
+# ── 客机交互通道（留空 = 不做客机侧检查，相关项在 status 里降级为 ⚠）──────
+WB_GUEST_USER=
+WB_GUEST_HOST=
+
+# ── 复位轮回 ──────────────────────────────────────────────────────────────
+# amdgpu 绑定后等待初始化的秒数（太短会导致复位不彻底）
+WB_REBOOT_WAIT=30
