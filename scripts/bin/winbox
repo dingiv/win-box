@@ -29,7 +29,7 @@ WB_VERSION=$(cat -- "$WB_ROOT/VERSION" 2>/dev/null || printf 'unknown')
 # 这样骨架阶段也不会给出误导性的帮助文本。
 WB_COMMANDS=(
   detect conf adopt status evidence
-  host-prep vm-create gpu-attach
+  host-prep host-gpu vm-create gpu-attach
   lg-prepare lg-shmem reset-hook lg
   rom vm
 )
@@ -81,6 +81,7 @@ wb__cmd_desc() {
     status)     printf '全链路自检（退出码即结论）' ;;
     evidence)   printf '采集取证包（只读）' ;;
     host-prep)  printf '宿主机一次性准备（依赖/vfio/initramfs/内核参数）' ;;
+    host-gpu)   printf '宿主核显姿态开关（直通 / 还给宿主）' ;;
     vm-create)  printf '创建 UEFI+SecureBoot+TPM2 的 Windows 11 虚拟机' ;;
     gpu-attach) printf '把核显挂进虚拟机（ROM + root port + x-vga 模式）' ;;
     lg-prepare) printf 'Looking Glass 宿主侧准备（KVMFR 模块 + 构建客户端）' ;;

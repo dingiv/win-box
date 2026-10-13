@@ -129,7 +129,28 @@ winbox vm start
             └──────────┘
 ```
 
-### 3.2 VM 生命周期与"该做什么"
+### 3.2 宿主核显姿态（`winbox host-gpu`）
+
+驱动归属之上还有一层：**核显到底归谁用**。两种姿态各自是一组配置的集合，
+`host-gpu` 负责在它们之间切换（持久化 + 当前会话两件事）：
+
+```
+passthrough（直通姿态，默认）                     host（宿主姿态）
+  modprobe.d: ids= + softdep + 黑名单              以上全部撤掉
+  initramfs : amdgpu 已移除、vfio 三件套在         重建 initramfs
+  当前会话  : 核显绑在 vfio-pci                     核显绑在 amdgpu
+       │                                                │
+       └──────────── winbox host-gpu host ──────────────┘
+       ◄─────────── winbox host-gpu passthrough ────────┘
+
+两个方向都可能"需要重启才完全生效"（modprobe.d 会被打进 initramfs）→ 以码 5 收尾。
+判定只看持久化配置：黑名单与 ids= 只存在一个时是 mixed（语义不完整，status 会报）。
+```
+
+为什么需要它：调试"到底是哪一层在挡"（把 amdgpu 还回去看核显本身是否正常）、
+或临时把核显拿回宿主做编码/多屏。它是**唯一的**直通配置所有者——`host-prep` 也调用同一组函数。
+
+### 3.3 VM 生命周期与"该做什么"
 
 ```
  shut off ──start──▶ running ──ACPI shutdown──▶ shut off
@@ -139,7 +160,7 @@ winbox vm start
     │                   │ 不要 destroy（曾损坏 NTFS）   │
 ```
 
-### 3.3 共享内存通道
+### 3.4 共享内存通道
 
 ```
 kvmfr 未加载 ──lg-prepare──▶ /dev/kvmfr0 是字符设备 ──lg-shmem──▶ 域里有 ivshmem 参数

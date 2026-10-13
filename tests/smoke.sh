@@ -628,6 +628,77 @@ check '构建产物仍被忽略（不该入库）' 0 bash -c "
   cd '$WB_ROOT'
   git check-ignore -q src/romtool/romtool && git check-ignore -q src/romtool/tests/mkrom"
 
+printf '\n== 22. host-gpu：宿主核显姿态开关 ==\n'
+# 检测逻辑用**样本目录**测：不依赖本机 /etc，也不写任何真实文件
+mkfix() { _d=$1; shift; mkdir -p "$_d"; printf '%s\n' "$@" > "$_d/10-test.conf"; }
+mkfix "$TMP/hg-pa"  'options vfio-pci ids=1002:13c0,1002:1640' 'blacklist amdgpu'
+mkfix "$TMP/hg-ho"  '# 什么也没配' 'options snd_hda_intel dmic_detect=1'
+mkfix "$TMP/hg-mx1" 'blacklist amdgpu'
+mkfix "$TMP/hg-mx2" 'options vfio-pci ids=1002:13c0'
+printf '%s\n' 'blacklist amdgpu' > "$TMP/hg-pa/20-other.conf"
+
+hg() { env WB_HOST_GPU_DIR="$1" WB_HOST_GPU_MANAGED="$1/10-test.conf" bash -c "
+  export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; shift; \"\$@\"" _ "${@:2}"; }
+
+check '黑名单 + vfio ids 同时存在 → passthrough' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-pa' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == passthrough ]]"
+check '两者都不存在 → host' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-ho' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == host ]]"
+check '只有黑名单 → mixed（语义不完整）' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx1' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == mixed ]]"
+check '只有 vfio ids → mixed' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-mx2' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == mixed ]]"
+
+# 冲突检测：排在"我们管的文件"之外的同类配置要被指出来（带文件与行号）
+out=$(env WB_HOST_GPU_DIR="$TMP/hg-pa" WB_HOST_GPU_MANAGED="$TMP/hg-pa/10-test.conf" bash -c "
+  export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_conflicts")
+has '冲突检测指出别人的文件' "$out" '20-other.conf:1'
+lacks '冲突检测不会把自己管的文件算进去' "$out" '10-test.conf'
+
+# 注释掉的配置不算数（否则切完姿态会被自己的注释挡回来）
+mkdir -p "$TMP/hg-cmt"
+printf '%s\n' '#blacklist amdgpu' '# options vfio-pci ids=1002:13c0' > "$TMP/hg-cmt/10-test.conf"
+check '注释掉的黑名单/ids 不算配置' 0 bash -c "
+  [[ \$(env WB_HOST_GPU_DIR='$TMP/hg-cmt' bash -c \"export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/host.sh'; wb_host_gpu_detect\") == host ]]"
+
+# 干跑写配置：把路径全指到临时目录，确认一个文件都不产生
+HG="$TMP/hg-fix"
+mkdir -p "$HG"
+cat > "$TMP/hg-dryrun.sh" <<'EOS'
+export WB_ROOT="@WBR@"
+export WB_DRY_RUN=1                 # 干跑：一个文件都不该产生
+export WB_HOST_GPU_DIR="@DIR@"
+export WB_HOST_GPU_MANAGED="@DIR@/vfio.conf"
+export WB_HOST_GPU_MODFILE="@DIR@/modules"
+export WB_HOST_GPU_LOADFILE="@DIR@/load.conf"
+source "$WB_ROOT/scripts/lib/host.sh"
+wb_conf_load
+wb_host_gpu_config_passthrough || true
+EOS
+sed -e "s|@WBR@|$WB_ROOT|" -e "s|@DIR@|$HG|" "$TMP/hg-dryrun.sh" > "$TMP/hg-dryrun2.sh"
+out=$(WB_CONF_PATH="$TMP/render.conf" bash "$TMP/hg-dryrun2.sh" 2>&1)
+has '干跑写直通配置会打印计划' "$out" '[dry-run]'
+has '干跑计划里含 ids=' "$out" 'ids=1002:13c0'
+check '干跑没有真的创建文件' 0 bash -c "[[ -z \$(find '$HG' -type f -print -quit) ]]"
+
+# 命令层
+check 'winbox host-gpu（status）可跑' 0 "$WB_ROOT/scripts/bin/winbox" host-gpu
+out=$("$WB_ROOT/scripts/bin/winbox" host-gpu status 2>&1)
+has 'host-gpu status 报出姿态' "$out" 'mode'
+has 'host-gpu status 报出核显驱动' "$out" 'driver'
+check '未知动作 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" host-gpu nonsense
+check '真跑需 root → 码 3' 3 "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
+# 本机确实存在"别人的文件里也有黑名单"的情况（blacklist.conf），
+# 因此不带 --takeover 的 host 切换应当以码 3 拒绝，并提示 --takeover
+out=$("$WB_ROOT/scripts/bin/winbox" -n host-gpu host 2>&1); rc=$?
+if [[ $rc == 3 ]]; then
+  ok '有冲突且未给 --takeover → 码 3（拒绝执行）'
+  has '冲突提示里给出 --takeover 的用法' "$out" '--takeover'
+else
+  bad "期望码 3（存在冲突配置），实得 $rc"; printf '%s\n' "$out" | sed 's/^/      /'
+fi
+check '带 --takeover 的干跑可以走完（仍不落盘）' 0 "$WB_ROOT/scripts/bin/winbox" -n host-gpu host --takeover
+
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1

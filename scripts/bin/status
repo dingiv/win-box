@@ -30,6 +30,8 @@ source "$WB_LIB_DIR/xml.sh"
 source "$WB_LIB_DIR/guest.sh"
 # shellcheck source=../lib/lg.sh
 source "$WB_LIB_DIR/lg.sh"
+# shellcheck source=../lib/host.sh
+source "$WB_LIB_DIR/host.sh"
 # shellcheck source=../lib/report.sh
 source "$WB_LIB_DIR/report.sh"
 
@@ -146,6 +148,25 @@ if [[ $SCOPE == all || $SCOPE == host ]]; then
       wb_report_item bad "$KVMFR_DEV 不是字符设备（曾被 QEMU 建成普通文件）" \
         '关机后 rm -f /dev/kvmfr0 && modprobe kvmfr；再 winbox lg-shmem' ;;
   esac
+
+  # 宿主核显姿态：直通 / 宿主 / 混合（后者语义不完整，值得出声）
+  pmode=$(wb_host_gpu_detect)
+  pdesired=$(wb_conf_get_default WB_HOST_GPU_MODE '')
+  case $pmode in
+    passthrough)
+      wb_report_item ok '宿主核显姿态：直通（宿主不加载 amdgpu）' \
+        "winbox host-gpu host 可把核显还给宿主" ;;
+    host)
+      wb_report_item warn '宿主核显姿态：宿主（核显归宿主使用，此时无法直通）' \
+        '要直通就 winbox host-gpu passthrough' ;;
+    *)
+      wb_report_item bad "宿主核显姿态：混合（$pmode）—— 黑名单与 vfio ids= 只存在一个" \
+        '用 winbox host-gpu passthrough|host 明确切一次' ;;
+  esac
+  if [[ -n $pdesired && $pdesired != "$pmode" ]]; then
+    wb_report_item warn "期望姿态与实际不一致：desired=$pdesired actual=$pmode" \
+      '刚切完没重启？winbox host-gpu status 看细节'
+  fi
 
   pstate=$(wb_lg_permissions_state)
   case $pstate in

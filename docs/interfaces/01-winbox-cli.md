@@ -119,7 +119,7 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 3 = 非 root；`test` 时若 amdgpu 未能绑定 → 码 5（提示需冷启动）
 - **生命周期**：幂等；钩子本体**永远 exit 0**（绝不阻塞 VM 启动）
 
-#### `winbox lg [--idd-prefs|--ini-reset] [客户端参数…]`
+#### `winbox lg [--idd-prefs|--idd-show|--ini-reset] [客户端参数…]`
 
 - **输入**：透传给 Looking Glass 客户端的参数；两个特殊开关：
   `--idd-prefs` = 只应用客机 IDD 偏好（ExclusiveMonitor=0 / ForceIndirectCopy=1 / ForceFullDirectCopy=0 + 重载驱动）；
@@ -143,6 +143,25 @@ winbox [全局选项] <command> [command 选项]
 | `merge --vbios A [--gop B] OUT` | 合并 legacy VBIOS 与 GOP 镜像 |
 | `dump --bdf … OUT` | 提取本机设备 ROM（需 root） |
 | `extract --from BIOS.IMG [--list] [--index N] OUT` | 在 BIOS 镜像里扫 ROM 候选 |
+
+#### `winbox host-gpu [status|passthrough|host] [--takeover]`
+
+宿主核显姿态开关。**姿态只看持久化配置**（不看"此刻绑在哪个驱动"，那属于细节）：
+
+| 姿态 | `/etc/modprobe.d` | initramfs | 核显驱动 |
+| --- | --- | --- | --- |
+| `passthrough` | `options vfio-pci ids=…` + `softdep amdgpu pre: vfio-pci` + 黑名单 | amdgpu 已移除、vfio 三件套在 | `vfio-pci` |
+| `host` | 以上全部撤掉 | 重建（否则早期启动仍按旧 modprobe.d 挡 amdgpu） | `amdgpu` |
+| `mixed` | 只有其中一项 | — | 视情况 —— **语义不完整**，`status` 会报 bad |
+
+- **输入**：动作（默认 `status`）；`--takeover` = 把**别人文件里**的直通配置注释掉（改前备份 + 逐条打印，带
+  `# win-box host-gpu --takeover:` 标记）
+- **输出**：`status` 打印 `mode / desired / blacklisted / vfio_ids / softdep / driver / amdgpu_loaded / framebuffer_in_use`；
+  切换做两件事：**持久化配置**（modprobe.d + initramfs）与**立即生效**（当前会话的绑定）
+- **失败**：码 2 = 动作非法；码 3 = 非 root（真跑）/ VM 正在运行 / 有冲突而未给 `--takeover` / 未配置 BDF；
+  **码 5 = 持久化有改动（需要重启）**，或用户在"核显正被宿主使用"的确认处取消
+- **生命周期**：幂等——没有持久化改动时退出 0 且**不要求重启**；两个方向的"当前会话"部分也幂等（已在该驱动上就跳过）
+- **为什么"只删黑名单"不够**、**为什么内核参数不用动**：见 `04-lib-api.md` 的 `lib/host.sh` 一节
 
 ### 运维转发
 

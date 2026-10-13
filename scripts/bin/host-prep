@@ -29,6 +29,8 @@ source "$WB_LIB_DIR/sys.sh"
 source "$WB_LIB_DIR/conf.sh"
 # shellcheck source=../lib/detect.sh
 source "$WB_LIB_DIR/detect.sh"
+# shellcheck source=../lib/host.sh
+source "$WB_LIB_DIR/host.sh"
 
 SKIP_DEPS=0
 while (( $# )); do
@@ -104,107 +106,27 @@ if wb_have_cmd virsh; then
 fi
 
 # ── 3/6 vfio 模块配置 ────────────────────────────────────────────────────
-wb_step '3/6' 'vfio 模块配置（ids= + softdep + 黑名单）'
+wb_step '3/6' 'vfio 配置 + initramfs（与 winbox host-gpu 共用同一份实现）'
 GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
 if [[ -z $GPU_BDF ]]; then
   wb_warn '未配置 WB_GPU_BDF —— 跳过 vfio 配置（先跑 winbox detect --write）'
 else
-  # 需要 vendor:device：优先用配置，缺了就从 sysfs 读
-  GPU_ID=$(wb_conf_get_default WB_GPU_ID '')
-  AUDIO_ID=$(wb_conf_get_default WB_AUDIO_ID '')
-  dev_id_of() {
-    local bdf=${1:-} p
-    [[ -n $bdf ]] || return 0
-    p="/sys/bus/pci/devices/$bdf"
-    [[ -r $p/vendor && -r $p/device ]] || return 0
-    printf '%s:%s\n' "$(sed 's/^0x//' "$p/vendor")" "$(sed 's/^0x//' "$p/device")"
-  }
-  [[ -n $GPU_ID ]] || GPU_ID=$(dev_id_of "$GPU_BDF")
-  AUDIO_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
-  [[ -n $AUDIO_ID ]] || AUDIO_ID=$(dev_id_of "$AUDIO_BDF")
-  [[ -n $GPU_ID ]] || wb_fail 3 host-prep "读不到核显的 vendor:device：$GPU_BDF" \
-    "docs/interfaces/01-winbox-cli.md"
-
-  ids=$GPU_ID
-  [[ -n $AUDIO_ID ]] && ids="$GPU_ID,$AUDIO_ID"
-
-  want_vfio="options vfio-pci ids=$ids
-softdep amdgpu pre: vfio-pci
-softdep snd_hda_intel pre: vfio-pci"
-
-  # initramfs 里加载了 vfio 的机器才需要考虑顺序；第 4 步会把 vfio 四件套补齐
-  if [[ -f /etc/modprobe.d/vfio.conf ]] && [[ $(cat /etc/modprobe.d/vfio.conf) == "$want_vfio" ]]; then
-    wb_ok "vfio.conf 已就绪（ids=$ids）"
-  else
-    wb_write /etc/modprobe.d/vfio.conf "$want_vfio"
-    wb_ok "已写入 /etc/modprobe.d/vfio.conf（ids=$ids）"
+  # 这一段（modprobe.d 的 ids=/softdep/黑名单 + initramfs 模块表）由 lib/host.sh 统一负责：
+  # host-prep 只是"默认把它置成直通姿态"，切换由 winbox host-gpu 完成。
+  if wb_host_gpu_config_passthrough; then
     REBOOT_REQUIRED=1
-    CHANGED=1
-  fi
-
-  # 黑名单 amdgpu：全目录检查，已经黑过就不重复写（本机就在 blacklist.conf 里）
-  if grep -rqs '^\s*blacklist\s\+amdgpu\b' /etc/modprobe.d/; then
-    wb_ok 'amdgpu 已在黑名单（任意 modprobe.d 文件）'
-  else
-    printf '\n# win-box：核显交给 vfio-pci，宿主不需要 amdgpu\nblacklist amdgpu\n' >> /etc/modprobe.d/vfio.conf
-    wb_ok '已把 amdgpu 加入黑名单'
-    REBOOT_REQUIRED=1
-    CHANGED=1
-  fi
-
-  # initramfs 里已经有 vfio_pci 时，modules-load 是冗余的；两种情况都只是"下次启动自然生效"，
-  # 因此不设 REBOOT_REQUIRED（否则一台本来就配好的机器会被误报成"需要重启"）
-  if [[ -f /etc/modules-load.d/vfio-pci.conf ]]; then
-    wb_ok 'vfio-pci 已配置开机加载'
-  elif grep -qE '^\s*vfio_pci\s*$' /etc/initramfs-tools/modules 2>/dev/null; then
-    wb_ok 'vfio_pci 已在 initramfs 模块表里（无需额外的 modules-load 条目）'
-  else
-    wb_write /etc/modules-load.d/vfio-pci.conf 'vfio-pci'
-    wb_ok '已配置 vfio-pci 开机加载'
     CHANGED=1
   fi
 fi
 
-# ── 4/6 initramfs：把 amdgpu 拿掉，把 vfio 补齐 ───────────────────────────
-wb_step '4/6' 'initramfs 模块表（关键：blacklist 管不住显式 modprobe）'
-MODFILE=/etc/initramfs-tools/modules
-[[ -f $MODFILE ]] || wb_run touch "$MODFILE"
-initramfs_changed=0
-
-if grep -qE '^\s*amdgpu\s*$' "$MODFILE" 2>/dev/null; then
-  tmp=$(mktemp)
-  awk '{ if ($0 ~ /^[ \t]*amdgpu[ \t]*$/) print "# amdgpu（win-box：已从 initramfs 移除，核显交给 vfio-pci）"; else print }' \
-    "$MODFILE" > "$tmp"
-  if wb_is_dry_run; then
-    wb_log "  [dry-run] 从 $MODFILE 注释掉 amdgpu"
-  else
-    cp -a "$MODFILE" "${MODFILE}.bak.$(date +%Y%m%d%H%M%S)"
-    install -m 644 "$tmp" "$MODFILE"
-    wb_ok '已从 initramfs 模块表移除 amdgpu'
-  fi
-  rm -f "$tmp"
-  initramfs_changed=1
+wb_step '4/6' '检查其它 modprobe.d 文件是否也在管同一件事'
+conflicts=$(wb_host_gpu_conflicts)
+if [[ -n $conflicts ]]; then
+  wb_warn '以下位置也有直通相关配置（win-box 不擅自改别人的文件）：'
+  printf '%s\n' "$conflicts" | sed 's/^/      /' >&2
+  wb_hint '要收敛到一处：sudo winbox host-gpu passthrough --takeover'
 else
-  wb_ok 'initramfs 模块表里没有 amdgpu（正确）'
-fi
-
-for m in vfio vfio_iommu_type1 vfio_pci; do
-  if grep -qE "^\s*$m\s*$" "$MODFILE" 2>/dev/null; then
-    :
-  else
-    printf '%s\n' "$m" >> "$MODFILE"
-    wb_ok "已把 $m 加入 initramfs 模块表"
-    initramfs_changed=1
-  fi
-done
-
-if (( initramfs_changed )); then
-  wb_run update-initramfs -u -k all || wb_fail 1 host-prep "update-initramfs 失败" "docs/zh/07-踩坑大全.md"
-  REBOOT_REQUIRED=1
-  CHANGED=1
-  wb_ok 'initramfs 已重建'
-else
-  wb_ok 'initramfs 模块表无需改动'
+  wb_ok '没有其它文件在竞争'
 fi
 
 # ── 5/6 内核参数 ─────────────────────────────────────────────────────────

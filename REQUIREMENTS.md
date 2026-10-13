@@ -94,7 +94,7 @@
 
 15 条完成标准中，除「推送远程仓库」这类工程性事务外均已达成：
 
-- ✅ 命令全部实现（detect / host-prep / adopt / vm-create / conf / vm / gpu-attach /
+- ✅ 命令全部实现（detect / host-prep / **host-gpu** / vm-create / conf / vm / gpu-attach /
   lg-prepare / lg-shmem / lg / reset-hook / status / evidence / rom）
 - ✅ shellcheck 全绿；`tests/smoke.sh` 261 条断言（不需虚拟机/核显/root）
 - ✅ C 工具 `src/romtool`：`make test` 52 条断言，用合成 ROM（仓库内不含 AMD 二进制），

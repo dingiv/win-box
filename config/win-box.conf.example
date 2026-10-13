@@ -78,6 +78,11 @@ WB_GUEST_HOST=
 WB_GUEST_KEY=~/.ssh/vm-win11
 WB_GUEST_PORT=22
 
+# ── 宿主核显姿态（由 `winbox host-gpu` 维护）──────────────────────────────
+# passthrough = 宿主不用核显（直通的前提）；host = 核显归宿主使用
+# 它记录的是"期望姿态"，status 拿它和实际检出结果比对，用来发现漂移
+WB_HOST_GPU_MODE=passthrough
+
 # ── 复位轮回 ──────────────────────────────────────────────────────────────
 # amdgpu 接管后等待初始化的秒数（太短会导致复位不彻底）
 WB_REBOOT_WAIT=30

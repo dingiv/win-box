@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# code-master:title win-box · 宿主核显姿态（lib/host.sh）
+#
+# 契约：docs/interfaces/04-lib-api.md
+#
+# 「宿主核显姿态」有两种，本文件负责在它们之间切换，并让判定可复现：
+#
+#   passthrough（直通姿态，默认）
+#     /etc/modprobe.d/vfio.conf : options vfio-pci ids=…  + softdep amdgpu pre: vfio-pci
+#     amdgpu 被黑名单挡住；initramfs 里没有 amdgpu；核显绑在 vfio-pci 上
+#     → 宿主不用它，客机才能直通
+#
+#   host（宿主姿态）
+#     上述配置全部撤掉；amdgpu 可正常加载；核显交回宿主
+#     → 用于把核显还给宿主（编码 / 多屏 / 调试），或验证"到底是哪一层在挡"
+#
+# 三个事实（决定了"开关"必须动哪些东西，漏一个就表现为"改了却没生效"）：
+#   1. 只删黑名单**不够**：`options vfio-pci ids=` 会让 vfio-pci 启动早期就把核显抢走
+#      （vfio_pci 在 initramfs 里，早于 amdgpu）→ 必须同时清掉 ids= 与 softdep。
+#   2. modprobe.d 会被**打进 initramfs**：改完必须 update-initramfs；否则早期启动仍按旧配置走。
+#      因此在两个方向上都可能"需要重启才完全生效"。
+#   3. 内核参数（video=efifb:off / initcall_blacklist=sysfb_init）**不用动**：
+#      它们只关掉简单 framebuffer（正是为了让 amdgpu 干净接管），不影响 amdgpu 工作。
+#
+# 所有函数都可单独调用（场景 4）。检测类函数只读，切换类函数受 --dry-run 控制。
+
+[[ -n ${WB_LIB_HOST_LOADED:-} ]] && return 0
+WB_LIB_HOST_LOADED=1
+
+WB_LIB_DIR=${WB_LIB_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
+# shellcheck source=./log.sh
+[[ -n ${WB_LIB_LOG_LOADED:-} ]] || source "$WB_LIB_DIR/log.sh"
+# shellcheck source=./sys.sh
+[[ -n ${WB_LIB_SYS_LOADED:-} ]] || source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=./conf.sh
+[[ -n ${WB_LIB_CONF_LOADED:-} ]] || source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=./pci.sh
+[[ -n ${WB_LIB_PCI_LOADED:-} ]] || source "$WB_LIB_DIR/pci.sh"
+# shellcheck source=./gpu.sh
+[[ -n ${WB_LIB_GPU_LOADED:-} ]] || source "$WB_LIB_DIR/gpu.sh"
+
+WB_CONF_KEYS+=(WB_HOST_GPU_MODE)
+
+# 可覆盖，便于离线测试（与 wb_lg__qemu_conf_acl_render 同一手法）
+WB_HOST_GPU_DIR=${WB_HOST_GPU_DIR:-/etc/modprobe.d}
+WB_HOST_GPU_MANAGED=${WB_HOST_GPU_MANAGED:-$WB_HOST_GPU_DIR/vfio.conf}
+WB_HOST_GPU_MODFILE=${WB_HOST_GPU_MODFILE:-/etc/initramfs-tools/modules}
+WB_HOST_GPU_LOADFILE=${WB_HOST_GPU_LOADFILE:-/etc/modules-load.d/vfio-pci.conf}
+
+# ── 检测（只读；不打印其它东西）──────────────────────────────────────────
+
+# 任意非注释行里是否黑名单了 amdgpu
+wb_host_gpu_blacklisted() {
+  local f
+  for f in "$WB_HOST_GPU_DIR"/*.conf; do
+    [[ -f $f ]] || continue
+    # grep 只看没有被 # 开头的行
+    if grep -qE '^[[:space:]]*blacklist[[:space:]]+amdgpu([[:space:]]|$)' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 任意非注释行里是否有 options vfio-pci ... ids=
+wb_host_gpu_has_vfio_ids() {
+  local f
+  for f in "$WB_HOST_GPU_DIR"/*.conf; do
+    [[ -f $f ]] || continue
+    if grep -qE '^[[:space:]]*options[[:space:]]+vfio-pci[[:space:]].*ids=' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 是否有 softdep amdgpu pre: vfio-pci
+wb_host_gpu_has_softdep() {
+  local f
+  for f in "$WB_HOST_GPU_DIR"/*.conf; do
+    [[ -f $f ]] || continue
+    if grep -qE '^[[:space:]]*softdep[[:space:]]+amdgpu[[:space:]]+pre:[[:space:]]*vfio-pci' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 结论：passthrough | host | mixed
+#   判定只看**持久化配置**（黑名单 + ids=），不看当前绑定状态 ——
+#   因为"配置是直通、但刚切完还没重启"是真实存在的中间态，那属于 detail 要显示的信息，
+#   不该让结论本身摇罢不定。
+wb_host_gpu_detect() {
+  local bl=0 ids=0
+  wb_host_gpu_blacklisted && bl=1
+  wb_host_gpu_has_vfio_ids && ids=1
+  if (( bl && ids )); then printf 'passthrough\n'
+  elif (( !bl && !ids )); then printf 'host\n'
+  else printf 'mixed\n'; fi
+}
+
+# 人类/机器可读的细节（供 status 与 evidence 用）
+wb_host_gpu_detail() {
+  local gpu drv bl ids sd
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  drv='（未配置核显）'
+  [[ -n $gpu ]] && drv=$(wb_pci_driver "$gpu")
+  wb_host_gpu_blacklisted && bl=yes || bl=no
+  wb_host_gpu_has_vfio_ids && ids=yes || ids=no
+  wb_host_gpu_has_softdep && sd=yes || sd=no
+  printf 'mode=%s\n' "$(wb_host_gpu_detect)"
+  printf 'desired=%s\n' "$(wb_conf_get_default WB_HOST_GPU_MODE '')"
+  printf 'blacklisted=%s\n' "$bl"
+  printf 'vfio_ids=%s\n' "$ids"
+  printf 'softdep=%s\n' "$sd"
+  printf 'driver=%s\n' "$drv"
+  printf 'amdgpu_loaded=%s\n' "$(lsmod 2>/dev/null | grep -q '^amdgpu' && echo yes || echo no)"
+  printf 'framebuffer_in_use=%s\n' "$(wb_host_gpu_amdgpu_in_use && echo yes || echo no)"
+}
+
+# 冲突：不在我们管的文件里出现的黑名单 / ids 配置（每行 "文件:行号:内容"）
+wb_host_gpu_conflicts() {
+  local f managed_real
+  managed_real=$(readlink -f "$WB_HOST_GPU_MANAGED" 2>/dev/null || printf '%s' "$WB_HOST_GPU_MANAGED")
+  for f in "$WB_HOST_GPU_DIR"/*.conf "$WB_HOST_GPU_DIR"/*.conf.disabled; do
+    [[ -f $f ]] || continue
+    [[ $(readlink -f "$f" 2>/dev/null || printf '%s' "$f") == "$managed_real" ]] && continue
+    grep -nE '^[[:space:]]*(blacklist[[:space:]]+amdgpu([[:space:]]|$)|options[[:space:]]+vfio-pci[[:space:]].*ids=|softdep[[:space:]]+amdgpu[[:space:]]+pre:)' \
+      "$f" 2>/dev/null | sed "s|^|$f:|"
+  done
+  return 0
+}
+
+# 核显是否正被宿主使用：
+#   只查**核显自己**的 DRM 卡（曾经误写成 /sys/class/drm/card*/status —— 既看了别人的卡，
+#   而且那个路径根本不存在：连接器状态在 card0-HDMI-A-1/status 这类目录里）
+wb_host_gpu_amdgpu_in_use() {
+  local gpu p card c st links=()
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  [[ -n $gpu ]] || return 1
+  p="/sys/bus/pci/devices/$gpu/drm"
+  [[ -d $p ]] || return 1        # 连 DRM 节点都没有 = 显示栈根本没接管核显
+
+  card=''
+  for c in "$p"/card[0-9]*; do
+    [[ -e $c ]] || continue
+    card=$(basename -- "$c")
+    break
+  done
+  [[ -n $card ]] || return 1
+
+  # 已连接的输出（显示器/HDMI 接收端）
+  for c in /sys/class/drm/"$card"-*/status; do
+    [[ -r $c ]] || continue
+    st=$(cat "$c" 2>/dev/null)
+    [[ $st == connected ]] && return 0
+  done
+
+  # 有进程打开着该卡的设备节点（by-path 精确指向核显；没有该目录就跳过这条判据）
+  for c in /dev/dri/by-path/pci-"$gpu"-*; do
+    [[ -e $c ]] && links+=("$c")
+  done
+  if (( ${#links[@]} )) && wb_have_cmd fuser; then
+    fuser -s "${links[@]}" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+wb_host_gpu_vm_running() {
+  local vm
+  wb_have_cmd virsh || return 1
+  vm=$(wb_conf_get_default WB_VM_NAME win11)
+  [[ $(virsh -c qemu:///system domstate "$vm" 2>/dev/null | tr -d ' ') == running ]]
+}
+
+# ── 持久化配置 ────────────────────────────────────────────────────────────
+
+# 需要从配置/硬件拿到的 vendor:device
+wb_host_gpu__ids() {
+  local gpu aud gid aid
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  aud=$(wb_conf_get_default WB_AUDIO_BDF '')
+  gid=$(wb_conf_get_default WB_GPU_ID '')
+  aid=$(wb_conf_get_default WB_AUDIO_ID '')
+  dev_id_of() {
+    local bdf=${1:-} d
+    [[ -n $bdf ]] || return 0
+    d="/sys/bus/pci/devices/$bdf"
+    [[ -r $d/vendor && -r $d/device ]] || return 0
+    printf '%s:%s\n' "$(sed 's/^0x//' "$d/vendor")" "$(sed 's/^0x//' "$d/device")"
+  }
+  [[ -n $gid ]] || gid=$(dev_id_of "$gpu")
+  [[ -n $aid ]] || aid=$(dev_id_of "$aud")
+  [[ -n $gid ]] || wb_fail 3 host-gpu "读不到核显的 vendor:device（先跑 winbox detect --write）" \
+    "docs/interfaces/01-winbox-cli.md"
+  if [[ -n $aid ]]; then printf '%s,%s\n' "$gid" "$aid"; else printf '%s\n' "$gid"; fi
+}
+
+# initramfs 模块表：passthrough 要求 amdgpu 不在、vfio 三件套在
+# 返回 0 = 有改动
+wb_host_gpu__initramfs_passthrough() {
+  local changed=0 tmp
+  [[ -f $WB_HOST_GPU_MODFILE ]] || wb_run touch "$WB_HOST_GPU_MODFILE"
+  if grep -qE '^[[:space:]]*amdgpu[[:space:]]*$' "$WB_HOST_GPU_MODFILE" 2>/dev/null; then
+    if wb_is_dry_run; then
+      wb_log "  [dry-run] 从 $WB_HOST_GPU_MODFILE 注释掉 amdgpu"
+    else
+      tmp=$(mktemp)
+      awk '{ if ($0 ~ /^[ \t]*amdgpu[ \t]*$/) print "# amdgpu（win-box：已从 initramfs 移除，核显交给 vfio-pci）"; else print }' \
+        "$WB_HOST_GPU_MODFILE" > "$tmp"
+      cp -a "$WB_HOST_GPU_MODFILE" "${WB_HOST_GPU_MODFILE}.bak.$(date +%Y%m%d%H%M%S)"
+      install -m 644 "$tmp" "$WB_HOST_GPU_MODFILE"
+      rm -f "$tmp"
+      wb_ok '已从 initramfs 模块表移除 amdgpu'
+    fi
+    changed=1
+  fi
+  local m
+  for m in vfio vfio_iommu_type1 vfio_pci; do
+    if ! grep -qE "^[[:space:]]*${m}[[:space:]]*$" "$WB_HOST_GPU_MODFILE" 2>/dev/null; then
+      if wb_is_dry_run; then
+        wb_log "  [dry-run] 向 $WB_HOST_GPU_MODFILE 追加 $m"
+      else
+        # 追加必须走 wb_write 之外的显式分支：>> 会绕过 --dry-run 直接创建文件
+        printf '%s\n' "$m" >> "$WB_HOST_GPU_MODFILE"
+        wb_ok "已把 $m 加入 initramfs 模块表"
+      fi
+      changed=1
+    fi
+  done
+  return "$(( changed ? 0 : 1 ))"
+}
+
+# 写 passthrough 姿态的 modprobe.d + initramfs（持久化部分；返回 0=有改动，1=无需改动）
+# 黑名单只在"别处没有"时才由我们写，避免与系统/用户既有文件重复
+wb_host_gpu_config_passthrough() {
+  local ids want current changed=0 rc=0
+  # 注意：wb_fail 在 $( ) 里只退出子壳 —— 必须显式把失败码传出去，
+  # 否则会带着空 ids 继续写配置（踩过）
+  ids=$(wb_host_gpu__ids) || rc=$?
+  if (( rc != 0 )); then return "$rc"; fi
+
+  want="options vfio-pci ids=$ids
+softdep amdgpu pre: vfio-pci
+softdep snd_hda_intel pre: vfio-pci"
+  if ! wb_host_gpu_blacklisted; then
+    want+="
+# win-box：核显交给 vfio-pci，宿主不加载 amdgpu（要还给宿主用 winbox host-gpu host）
+blacklist amdgpu"
+  fi
+
+  current=$(cat "$WB_HOST_GPU_MANAGED" 2>/dev/null || true)
+  if [[ $current == "$want" ]]; then
+    wb_ok "$WB_HOST_GPU_MANAGED 已是直通姿态"
+  else
+    wb_write "$WB_HOST_GPU_MANAGED" "$want"
+    wb_ok "已写入 $WB_HOST_GPU_MANAGED（ids=$ids）"
+    changed=1
+  fi
+
+  if [[ -f $WB_HOST_GPU_LOADFILE ]]; then
+    wb_ok 'vfio-pci 已配置开机加载'
+  elif grep -qE '^[[:space:]]*vfio_pci[[:space:]]*$' "$WB_HOST_GPU_MODFILE" 2>/dev/null; then
+    wb_ok 'vfio_pci 已在 initramfs 模块表里（无需额外 modules-load 条目）'
+  else
+    wb_write "$WB_HOST_GPU_LOADFILE" 'vfio-pci'
+    wb_ok '已配置 vfio-pci 开机加载'
+    changed=1
+  fi
+
+  wb_host_gpu__initramfs_passthrough && changed=1
+
+  if (( changed )) && ! wb_is_dry_run; then
+    wb_run update-initramfs -u -k all || return 1
+    wb_ok 'initramfs 已重建'
+  fi
+  return "$(( changed ? 0 : 1 ))"
+}
+
+# 写 host 姿态（撤掉我们的配置；冲突项需要 --takeover）
+# 返回 0=有改动，1=无需改动
+wb_host_gpu_config_host() {
+  local takeover=${1:-} changed=0 conflicts
+  conflicts=$(wb_host_gpu_conflicts)
+  if [[ -n $conflicts ]]; then
+    wb_warn '以下位置还有直通相关配置（不是 win-box 管的文件，默认不改动）：'
+    printf '%s\n' "$conflicts" | sed 's/^/      /' >&2
+    if [[ $takeover == --takeover ]]; then
+      wb_host_gpu_clean_conflicts
+      changed=1
+    else
+      wb_fail 3 host-gpu '存在冲突配置，未做改动（确认后加 --takeover 自动停用它们，或手工处理）' \
+        "docs/interfaces/01-winbox-cli.md"
+    fi
+  fi
+
+  if [[ -f $WB_HOST_GPU_MANAGED ]]; then
+    if wb_is_dry_run; then
+      wb_log "  [dry-run] 移除 $WB_HOST_GPU_MANAGED"
+    else
+      cp -a "$WB_HOST_GPU_MANAGED" "${WB_HOST_GPU_MANAGED}.bak.$(date +%Y%m%d%H%M%S)"
+      rm -f "$WB_HOST_GPU_MANAGED"
+      wb_ok "已移除 $WB_HOST_GPU_MANAGED（备份保留在同目录 .bak.*）"
+    fi
+    changed=1
+  fi
+
+  if [[ -f $WB_HOST_GPU_LOADFILE ]]; then
+    wb_run rm -f "$WB_HOST_GPU_LOADFILE"
+    wb_ok '已移除 vfio-pci 的 modules-load 条目（可选，已随上面一起撤）'
+    changed=1
+  fi
+
+  # initramfs 里的 amdgpu 注释：host 姿态下不需要它提前加载，但也不需要改回来；
+  # 真正要紧的是重建 initramfs，让里面那份 modprobe.d 不再挡 amdgpu。
+  if (( changed )) && ! wb_is_dry_run; then
+    wb_run update-initramfs -u -k all || wb_fail 1 host-gpu "update-initramfs 失败" \
+      "docs/zh/07-踩坑大全.md"
+    wb_ok 'initramfs 已重建（否则早期启动仍按旧的 modprobe.d 走）'
+  fi
+  return "$(( changed ? 0 : 1 ))"
+}
+
+# 注释掉冲突行（备份 + 逐条打印）
+wb_host_gpu_clean_conflicts() {
+  local line f rest last_backed=''
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    f=${line%%:*}
+    rest=${line#*:}
+    if wb_is_dry_run; then
+      wb_log "  [dry-run] 注释掉 $f 第 ${rest%%:*} 行"
+      continue
+    fi
+    [[ -f $f ]] || continue
+    if [[ $f != "$last_backed" ]]; then
+      cp -a "$f" "${f}.bak.$(date +%Y%m%d%H%M%S)"
+      last_backed=$f
+    fi
+    sed -i -E 's|^([[:space:]]*)(blacklist[[:space:]]+amdgpu([[:space:]]|$))|# win-box host-gpu --takeover: \1\2|; s|^([[:space:]]*)(options[[:space:]]+vfio-pci[[:space:]].*ids=.*)$|# win-box host-gpu --takeover: \1\2|; s|^([[:space:]]*)(softdep[[:space:]]+amdgpu[[:space:]]+pre:.*)$|# win-box host-gpu --takeover: \1\2|' "$f"
+    wb_ok "已停用 $f 第 ${rest%%:*} 行（备份 ${f}.bak.*）"
+  done <<< "$(wb_host_gpu_conflicts)"
+  return 0
+}
+
+# ── 立即生效（当前会话）───────────────────────────────────────────────────
+
+# 把核显交给 vfio-pci（先解绑当前驱动）
+wb_host_gpu_live_passthrough() {
+  local gpu aud d
+  wb_require_root
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  aud=$(wb_conf_get_default WB_AUDIO_BDF '')
+  [[ -n $gpu ]] || wb_fail 3 host-gpu '未配置 WB_GPU_BDF' 'docs/interfaces/01-winbox-cli.md'
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    [[ $(wb_pci_driver "$d") == vfio-pci ]] && { wb_ok "$d 已在 vfio-pci"; continue; }
+    wb_pci_override "$d" vfio-pci || true
+    wb_pci_unbind "$d" || true
+    wb_pci_bind "$d" vfio-pci || wb_warn "$d 绑定 vfio-pci 失败"
+    wb_ok "$d → vfio-pci"
+  done
+}
+
+# 把核显交回宿主：解绑 vfio-pci（并清 driver_override）→ 加载 amdgpu → 等它就位
+wb_host_gpu_live_host() {
+  local gpu aud d drv
+  wb_require_root
+  gpu=$(wb_conf_get_default WB_GPU_BDF '')
+  aud=$(wb_conf_get_default WB_AUDIO_BDF '')
+  [[ -n $gpu ]] || wb_fail 3 host-gpu '未配置 WB_GPU_BDF' 'docs/interfaces/01-winbox-cli.md'
+
+  for d in "$gpu" "$aud"; do
+    [[ -n $d ]] || continue
+    # 清掉 driver_override，否则内核仍会按 override 把它交回 vfio-pci
+    wb_pci_override_clear "$d" || true
+    if [[ $(wb_pci_driver "$d") == vfio-pci ]]; then
+      wb_pci_unbind "$d" || wb_warn "$d 解绑失败"
+    fi
+    wb_pci_probe "$d" || true
+    wb_ok "$d 已交回宿主"
+  done
+
+  wb_run modprobe amdgpu || wb_warn 'modprobe amdgpu 失败（模块装了吗？看 dmesg）'
+  if [[ $(wb_pci_driver "$gpu") == amdgpu ]]; then
+    wb_ok "$gpu → amdgpu"
+  elif wb_pci_wait_driver "$gpu" amdgpu 15; then
+    wb_ok "$gpu → amdgpu（等待后绑定成功）"
+  else
+    drv=$(wb_pci_driver "$gpu")
+    wb_warn "$gpu 当前驱动是 $drv（不是 amdgpu）——可能要重启后才会真正归宿主"
+  fi
+}

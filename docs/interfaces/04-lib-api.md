@@ -92,6 +92,7 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 | `WB_GUEST_KEY` | 客机 SSH 私钥（支持 `~/`） | `~/.ssh/vm-win11` | 用户 |
 | `WB_GUEST_PORT` | 客机 SSH 端口 | `22` | 用户 |
 | `WB_REBOOT_WAIT` | 复位时等 amdgpu 初始化的秒数 | `30` | 用户 |
+| `WB_HOST_GPU_MODE` | **期望的**宿主核显姿态（`passthrough`/`host`）：由 `host-gpu` 写入，`status` 用它报漂移 | 空 | `host-gpu` |
 
 ## `lib/sys.sh` — 环境守卫
 
@@ -197,6 +198,41 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `lg` | `video-none` | off | 核显是非启动显示适配器（避开 `0xC01E0438`）；Look. Glass 的正确形态 |
 | `inspect` | `video-qxl` | off | QXL：在 SPICE 窗口里看客机内部（设备管理器/事件查看器） |
 | `both` | `video-qxl` | on | 双显示（实验组合） |
+
+## `lib/host.sh` — 宿主核显姿态
+
+在「直通姿态」与「宿主姿态」之间切换，并让判定可复现。
+
+| 函数 | 语义 |
+| --- | --- |
+| `wb_host_gpu_detect` | stdout = `passthrough` / `host` / `mixed`（**只看持久化配置**，不看当前绑定） |
+| `wb_host_gpu_blacklisted` / `wb_host_gpu_has_vfio_ids` / `wb_host_gpu_has_softdep` | 0/1 查询（只认**非注释**行） |
+| `wb_host_gpu_detail` | stdout = `key=value` 多行（供 `status`/`evidence` 用） |
+| `wb_host_gpu_conflicts` | stdout = `文件:行号:内容`——**我们管的文件之外**的直通配置 |
+| `wb_host_gpu_amdgpu_in_use` | 0/1：核显**自己的** DRM 卡有已连接输出，或有进程打开它的设备节点 |
+| `wb_host_gpu_vm_running` | 0/1 |
+| `wb_host_gpu_config_passthrough` | 持久化写直通姿态；返回 **0 = 有改动 / 1 = 无需改动 / ≥2 = 失败** |
+| `wb_host_gpu_config_host [--takeover]` | 持久化撤掉直通姿态（有冲突时不给 `--takeover` 就报码 3） |
+| `wb_host_gpu_clean_conflicts` | 注释冲突行（改前备份、逐条打印、带标记） |
+| `wb_host_gpu_live_passthrough` / `wb_host_gpu_live_host` | 当前会话的绑定切换（需 root） |
+
+**三条实测事实**（决定"开关"必须动哪些东西，漏一个就表现为"改了却没生效"）：
+
+1. **只删黑名单不够**：`options vfio-pci ids=` 会让 vfio-pci 在启动早期就把核显抢走
+   （`vfio_pci` 在 initramfs 里，早于 amdgpu）→ 必须同时清掉 `ids=` 与 `softdep`。
+2. **modprobe.d 会被打进 initramfs**：改完必须 `update-initramfs`，否则早期启动仍按旧配置走。
+   因此**两个方向都可能"需要重启才完全生效"**（码 5）。
+3. **内核参数不用动**：`video=efifb:off` / `initcall_blacklist=sysfb_init` 只关掉简单 framebuffer
+   （正是为了让 amdgpu 干净接管），**不影响 amdgpu 工作**。
+
+**可测性**：`WB_HOST_GPU_DIR` / `WB_HOST_GPU_MANAGED` / `WB_HOST_GPU_MODFILE` / `WB_HOST_GPU_LOADFILE`
+均可覆盖 → 冒烟测试用样本目录离线验证判定与冲突检测，不碰真实 `/etc`。
+
+> 踩过的两个坑（已修，均在测试里有断言）：
+> * 占用判定曾写成 `/sys/class/drm/card*/status` —— 既会看到**别人的**卡（NVIDIA 的显示器），
+>   而且那个路径根本不存在（连接器状态在 `card0-HDMI-A-1/status` 这类目录里）。
+>   现在只看核显自己的卡，并用 `/dev/dri/by-path/pci-<BDF>-*` 做占用判定。
+> * `wb_fail` 写在 `$( )` 里只退出子壳 —— 必须显式把失败码传出去，否则会带着空 `ids=` 继续写配置。
 
 ## `lib/report.sh` — 分节报告与取证清单
 

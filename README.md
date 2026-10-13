@@ -15,6 +15,7 @@
 ```bash
 scripts/bin/winbox detect        # 硬件探测（启发式识别核显，非硬编码 ID 表）
 scripts/bin/winbox host-prep     # 宿主准备（依赖 / vfio / initramfs / 内核参数；幂等）
+scripts/bin/winbox host-gpu      # 宿主核显姿态开关（直通 / 还给宿主；含冲突检查与 --takeover）
 scripts/bin/winbox adopt         # 接管现有 VM：把身份信息提取到配置
 scripts/bin/winbox vm-create     # 新建 VM（UEFI + TPM2，模板渲染）
 scripts/bin/winbox conf          # 配置的唯一读写入口
