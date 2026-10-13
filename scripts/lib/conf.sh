@@ -19,7 +19,6 @@ WB_LIB_DIR=${WB_LIB_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 [[ -n ${WB_LIB_SYS_LOADED:-} ]] || source "$WB_LIB_DIR/sys.sh"
 
 declare -gA WB_CONF=()
-declare -gA WB_CONF_SRC=()
 WB_CONF_PATH=${WB_CONF_PATH:-}
 
 # 已知键（用于 dump 与文档一致性；文件里的额外键也会被列出）
@@ -41,7 +40,7 @@ wb__conf_valid_key() { [[ ${1:-} =~ ^WB_[A-Z0-9_]+$ ]]; }
 # 语法错误 → 码 3（带行号），因为静默忽略错误行会让"配置没生效"变得极难排查。
 wb_conf_load() {
   local file=${1:-$(wb_conf_path)} line key val n=0
-  WB_CONF=(); WB_CONF_SRC=()
+  WB_CONF=()
   [[ -f $file ]] || return 0
 
   while IFS= read -r line || [[ -n $line ]]; do
@@ -56,7 +55,6 @@ wb_conf_load() {
       if [[ $val == \"*\" || $val == \'*\' ]]; then val=${val:1:${#val}-2}; fi
       wb__conf_valid_key "$key" || wb_fail 3 conf "配置文件第 $n 行键名非法: $key" "docs/interfaces/04-lib-api.md"
       WB_CONF[$key]=$val
-      WB_CONF_SRC[$key]=file
     else
       wb_fail 3 conf "配置文件第 $n 行语法错误: $line" "docs/interfaces/04-lib-api.md"
     fi
@@ -123,7 +121,6 @@ wb_conf_set() {
   mv -f -- "$tmp" "$file"
 
   WB_CONF[$key]=$val
-  WB_CONF_SRC[$key]=file
   return 0
 }
 
@@ -150,8 +147,8 @@ wb_conf_dump() {
   if (( json )); then printf '{'; else printf '%-20s %-6s %s\n' KEY 来源 值; fi
 
   while IFS= read -r k; do
-    v=$(printenv "$k" 2>/dev/null || true); src=env
-    if [[ -z $v ]]; then v=${WB_CONF[$k]:-}; src=file; fi
+    v=$(printenv "$k" 2>/dev/null || true); src='env'
+    if [[ -z $v ]]; then v=${WB_CONF[$k]:-}; src='file'; fi
     if [[ -z $v ]]; then
       if (( json )); then continue; fi
       v='(未设置)'; src=-

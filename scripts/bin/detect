@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox detect（scripts/bin/detect）
+#
+# 契约：docs/interfaces/01-winbox-cli.md
+#
+# 回答一个问题：「这台机器能不能做核显直通，用哪块卡、哪个 BDF、要不要治？」
+# 只读，不需要 root；只有 --write 才落盘（且经 wb_conf_set，受 --dry-run 控制）。
+#
+# 用法：
+#   winbox detect                              # 只报告
+#   winbox detect --write                      # 报告 + 写入 config/win-box.conf
+#   winbox detect --gpu 0000:0d:00.0 --write   # 多显卡机器：手工指定（自动判定有歧义时）
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/detect.sh
+source "$WB_LIB_DIR/detect.sh"
+# shellcheck source=../lib/gpu.sh
+source "$WB_LIB_DIR/gpu.sh"
+
+WRITE=0
+GPU_WANT=""
+
+while (( $# )); do
+  case $1 in
+    --write) WRITE=1; shift ;;
+    --gpu)
+      [[ -n ${2:-} ]] || wb_fail 2 detect "--gpu 需要 BDF 参数" "winbox --help"
+      GPU_WANT=$2; shift 2 ;;
+    -h | --help)
+      sed -n '4,13p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 detect "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+wb_conf_load
+CONF=$(wb_conf_path)
+p() { printf '%s\n' "$*"; }
+
+# ── 1. 宿主环境 ───────────────────────────────────────────────────────────
+p ''
+p '== 宿主环境 =='
+iommu=$(wb_detect_iommu)
+if [[ $iommu == enabled ]]; then
+  p "  ✓ IOMMU            enabled（$(wb_detect_iommu_count) 个分组）"
+else
+  p '  ✗ IOMMU            disabled —— 直通无从谈起，先按文档加内核参数并重启'
+fi
+
+tools=$(wb_detect_libvirt_tools)
+if [[ $tools == ok ]]; then
+  p '  ✓ libvirt/QEMU     virsh / virt-install / qemu-system-x86_64 就位'
+else
+  p "  ⚠ libvirt/QEMU     缺少: ${tools#missing:}（winbox host-prep 会装）"
+fi
+
+subs=$(wb_detect_submodules)
+if [[ $subs == ok ]]; then
+  p '  ✓ third_party/     三个 submodule 已初始化'
+else
+  p "  ⚠ third_party/     未初始化: ${subs#missing:}（git submodule update --init --recursive）"
+fi
+
+# ── 2. 显示设备候选（先把牌摊开，再下结论）────────────────────────────────
+p ''
+p '== 显示设备候选 =='
+p '  BDF            ID            CLASS     BAR合计   评分'
+while read -r bdf vd class; do
+  score=$(wb__igpu_score "$bdf")
+  bar=$(wb_detect_human_size "$(wb_detect_bar_total "$bdf")")
+  hint=''
+  [[ ${vd%%:*} == 1002 ]] || hint='（非 AMD）'
+  p "  $bdf   $vd   $class   $(printf '%6s' "$bar")   $score  $hint"
+done < <(wb_detect_display_devices)
+
+# ── 3. 选中核显（wb_detect_igpu 失败即码 4，语义是"硬件不匹配"）───────────
+igpu=$(wb_detect_igpu "${GPU_WANT:-}")
+gpu_bdf='' ; gpu_id='' ; aud_bdf='' ; aud_id=''
+while read -r role bdf class vd _; do
+  case $role in
+    vga)   gpu_bdf=$bdf; gpu_id=$vd ;;
+    audio) aud_bdf=$bdf; aud_id=$vd ;;
+  esac
+  : "$class"
+done <<< "$igpu"
+
+p ''
+p '== 选中核显 =='
+p "  ✓ VGA 功能         $gpu_bdf  $gpu_id  $(cat "/sys/bus/pci/devices/$gpu_bdf/class")"
+if [[ -n $aud_bdf ]]; then
+  p "  ✓ HDMI 音频功能    $aud_bdf  $aud_id  （直通时必须一起挂，且要各自的 ROM）"
+else
+  p '  ⚠ 没有同槽的 HDMI 音频功能 —— 直通时只挂 VGA 功能即可'
+fi
+
+if [[ $iommu == enabled ]]; then
+  grp=$(wb_detect_iommu_group "$gpu_bdf")
+  peers=$(wb_detect_iommu_peers "$gpu_bdf")
+  if [[ -z $peers ]]; then
+    p "  ✓ IOMMU 组 $grp       核显独占该组（最理想）"
+  else
+    p "  ⚠ IOMMU 组 $grp       与其它设备共享（需要 ACS 覆盖或换插槽）:"
+    while read -r d; do p "      $d  $(basename -- "$(readlink -f "/sys/bus/pci/devices/$d/driver" 2>/dev/null)" 2>/dev/null || echo '(无驱动)')"; done <<< "$peers"
+  fi
+fi
+
+cur=$(wb_conf_get_default WB_GPU_BDF '')
+if [[ -n $cur && $cur != "$gpu_bdf" ]]; then
+  p "  ⚠ 配置文件里写的是 $cur，与本次探测的 $gpu_bdf 不同 —— 硬件变了吗?"
+fi
+
+# ── 4. ROM 现状 ───────────────────────────────────────────────────────────
+p ''
+p '== ROM =='
+roms=$(wb_detect_vbios_roms "$gpu_bdf")
+if [[ -n $roms ]]; then
+  while read -r r; do
+    f="$(wb_conf_get_default WB_VBIOS_DIR /var/lib/libvirt/vbios)/$r"
+    p "  ✓ $r"
+    [[ -r $f ]] && p "      $(wb_gpu_rom_fingerprint "$f")"
+  done <<< "$roms"
+else
+  p '  ⚠ 尚未部署 ROM —— UEFI 下核显直通需要 VBIOS(或 VBIOS+GOP) 与音频 ROM'
+  p '      提取: sudo winbox rom dump --bdf '"$gpu_bdf"' ~/igpu.rom'
+fi
+
+# ── 5. 结论 ───────────────────────────────────────────────────────────────
+p ''
+p '== 结论 =='
+if [[ $iommu == disabled ]]; then
+  p '  ✗ 前置不满足：IOMMU 未启用'
+  p '      下一步: sudo winbox host-prep'
+else
+  p '  ✓ 这台机器具备核显直通的基本条件'
+  if [[ -z $roms ]]; then
+    p '      下一步: 提取 ROM（winbox rom dump）→ sudo winbox host-prep → winbox vm-create'
+  else
+    p '      下一步: sudo winbox host-prep'
+  fi
+fi
+
+# ── 6. 可选：写入配置 ─────────────────────────────────────────────────────
+if (( WRITE )); then
+  p ''
+  p "== 写入配置 $CONF =="
+  wb_conf_set WB_GPU_BDF "$gpu_bdf"
+  wb_conf_set WB_GPU_ID "$gpu_id"
+  if [[ -n $aud_bdf ]]; then
+    wb_conf_set WB_AUDIO_BDF "$aud_bdf"
+    wb_conf_set WB_AUDIO_ID "$aud_id"
+  fi
+  if [[ $iommu == enabled ]]; then
+    wb_conf_set WB_IOMMU_GROUP "$(wb_detect_iommu_group "$gpu_bdf")"
+  fi
+  if wb_is_dry_run; then
+    p '  （--dry-run：以上改动未落盘）'
+  else
+    p "  ✓ WB_GPU_BDF=$gpu_bdf"
+    [[ -n $aud_bdf ]] && p "  ✓ WB_AUDIO_BDF=$aud_bdf"
+    p "  ✓ 配置已写入（改前备份在同目录 .bak）"
+    p "      查看: winbox conf"
+  fi
+fi

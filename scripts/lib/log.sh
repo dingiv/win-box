@@ -53,9 +53,12 @@ wb_fail() {
   exit "$code"
 }
 
-# ── 命令执行（干跑与回显的唯一入口）───────────────────────────────────────
-# 所有会产生系统改动的命令都必须经 wb_run 执行，这样 --dry-run / --verbose
-# 才能在全局生效。直接执行命令在本项目里同样视为缺陷。
+# ── 命令执行与文件写入（干跑与回显的唯一入口）──────────────────────────
+# 所有会产生系统改动的操作都必须经这里：
+#   * 执行命令                    → wb_run
+#   * 向文件写值（sysfs 等）      → wb_write
+# 这样 --dry-run / --verbose 才能在全局生效。
+# 直接执行命令、或直接 `echo > /sys/...`，在本项目里视为缺陷。
 wb_run() {
   if (( WB_DRY_RUN )); then
     printf '  %s %s\n' "$(wb__paint 36 '[dry-run]')" "$*" >&2
@@ -65,6 +68,21 @@ wb_run() {
     printf '  %s %s\n' "$(wb__paint 36 '+')" "$*" >&2
   fi
   "$@"
+}
+
+# wb_write FILE VALUE —— 向文件写值的 wb_run 对应物（sysfs 之类）
+# 失败时返回 1、不退出：调用方决定这是致命错误还是一句警告
+wb_write() {
+  local file=${1:-} value=${2-}
+  [[ -n $file ]] || wb_fail 2 log "wb_write 缺少文件参数" "docs/interfaces/04-lib-api.md"
+  if (( WB_DRY_RUN )); then
+    printf '  %s %s ← %s\n' "$(wb__paint 36 '[dry-run]')" "$file" "$value" >&2
+    return 0
+  fi
+  if (( WB_VERBOSE )); then
+    printf '  %s %s ← %s\n' "$(wb__paint 36 '+')" "$file" "$value" >&2
+  fi
+  printf '%s\n' "$value" > "$file" 2>/dev/null
 }
 
 # wb_capture CMD… → stdout = 命令输出；失败不中断（调用方自行判据）

@@ -33,6 +33,7 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 | `wb_ok` / `wb_warn` | `wb_ok MSG` / `wb_warn MSG` | 成功 / 警告行 |
 | `wb_fail` | `wb_fail CODE STAGE MSG [DOC]` | **打印标准错误行并 exit CODE**（唯一允许 exit 的函数） |
 | `wb_run` | `wb_run CMD…` | 执行命令；`--dry-run` 时只打印；`--verbose` 时同时回显 |
+| `wb_write` | `wb_write FILE VALUE` | 向文件写值（sysfs 等）的 `wb_run` 对应物；失败返回 1 而不退出，由调用方决定严苛程度 |
 
 `wb_fail` 的输出格式固定（`00-overview.md` 定义），这是**所有失败信息的唯一出口**。
 
@@ -82,12 +83,18 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 
 | 函数 | 出参（stdout） | 说明 |
 | --- | --- | --- |
-| `wb_detect_igpu` | 多行：`BDF CLASS VENDOR:DEVICE`（AMD 核显的全部功能） | 无候选时返回 **码 4** 而非空 |
-| `wb_detect_iommu` | `enabled|disabled` | 读 `/sys/kernel/iommu_groups` |
+| `wb_detect_display_devices` | 每行 `<BDF> <VENDOR:DEVICE> <CLASS>` | 全部显示类设备（不限厂商） |
+| `wb_detect_igpu [BDF]` | 首行 `vga <BDF> <CLASS> <V:D> <BAR>`，次行 `audio …`（若有同槽音频） | 启发式选核显（评分：同槽 HDMI 音频 +2、BAR 合计 <4G +2）；无候选 → **码 4**；多候选同分 → **码 4** 并列出候选；给出 BDF 时直接验证该设备 |
+| `wb_detect_audio_sibling BDF` | 同槽 `.1` 的音频 BDF | 无则返回 1（不打印） |
+| `wb_detect_bar_total BDF` | 全部 BAR 合计字节数 | 读 `/sys/.../resource` |
+| `wb_detect_human_size BYTES` | `258M` 这类可读值 | 纯格式化 |
+| `wb_detect_iommu` | `enabled\|disabled` | 读 `/sys/kernel/iommu_groups` |
+| `wb_detect_iommu_count` | 分组数 | — |
 | `wb_detect_iommu_group BDF` | 组号 | 码 4 = 设备无组 |
-| `wb_detect_vbios_roms BDF` | 候选 ROM 文件名 | 在 `WB_VBIOS_DIR` 中按 ID 匹配 |
-| `wb_detect_submodules` | `ok|missing` | `third_party/` 是否已初始化 |
-| `wb_detect_libvirt_tools` | `ok|missing:…` | virsh/virt-install/virt-viewer 可用性 |
+| `wb_detect_iommu_peers BDF` | 同组其它设备（每行一个） | 空输出 = 独占 |
+| `wb_detect_vbios_roms [BDF]` | 已部署 ROM 的文件名 | 在 `WB_VBIOS_DIR` 中枚举，不做 ID 匹配（那需要解析 ROM） |
+| `wb_detect_submodules` | `ok\|missing:…` | `third_party/` 是否已初始化 |
+| `wb_detect_libvirt_tools` | `ok\|missing:…` | virsh/virt-install/qemu-system-x86_64 可用性 |
 
 **探测即契约**：`detect` 的输出格式是对外承诺——`--json` 与文本共用同一份字段。
 
