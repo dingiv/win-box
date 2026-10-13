@@ -53,11 +53,11 @@ winbox [全局选项] <command> [command 选项]
 > `adopt` 之后不要再用 `virsh edit`：手工改动会在下一次渲染时被覆盖。
 > 要改结构就改 `config/templates/domain.xml.in`（或复制为 `config/domain.local.xml` 后改），再 `winbox vm redeploy`。
 
-#### `winbox status [--host|--guest|--lg] [--json]`
+#### `winbox status [--host|--guest|--lg] [--json] [--quiet]`
 
-- **输入**：可选的检查面过滤
-- **输出**：分段报告（✓/✗/⚠ 逐项）+ 结论行 `RESULT: OK|DEGRADED|BROKEN`；`--json` 输出同构的 JSON
-- **失败**：**退出码即结论**——`0` = OK（全 ✓）、`6` = DEGRADED（有 ⚠ 无 ✗）、`7` = BROKEN（有 ✗）、`1` = 检查本身无法执行（如 libvirt 连不上）。**注意**：因退出码承载结论，在 `set -e` 的脚本里串联时需显式处理（`winbox status || true`）
+- **输入**：可选的检查面过滤；`--json` 输出机器可读结果；`--quiet` 只输出 JSON/结论
+- **输出**：分段报告（✓/✗/⚠/· 逐项）+ 结论行 `RESULT: OK|DEGRADED|BROKEN（计数）`；报告走 **stdout**（它是这条命令的产物）
+- **失败**：**退出码即结论**——`0` = OK（全 ✓）、`6` = DEGRADED（有 ⚠ 无 ✗）、`7` = BROKEN（有 ✗）、`1` = 检查本身无法执行（如缺 virsh）。**注意**：因退出码承载结论，在 `set -e` 的脚本里串联时需显式处理（`winbox status || true`）
 - **生命周期**：纯只读；不需要 root；可在虚拟机运行中/停止时调用
 
 #### `winbox evidence [--out DIR] [--after]`

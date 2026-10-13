@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox status（scripts/bin/status）
+#
+# 契约：docs/interfaces/01-winbox-cli.md ／ 链路：docs/calltrees/05-status-and-evidence.md
+#
+# 一条命令看清整条链路：宿主硬件与隔离 → 固件与模块 → libvirt 域定义 → Looking Glass → 客机。
+# 纯只读，不需要 root。**退出码即结论**：0 = 全绿，6 = 有警告，7 = 有故障，1 = 检查本身跑不了。
+#
+# 设计取舍：报告走 stdout（它是这条命令的产物），可以 | tee / grep / 贴进 issue。
+# 想只看某一面用 --host / --guest / --lg；想给机器读用 --json。
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/detect.sh
+source "$WB_LIB_DIR/detect.sh"
+# shellcheck source=../lib/pci.sh
+source "$WB_LIB_DIR/pci.sh"
+# shellcheck source=../lib/gpu.sh
+source "$WB_LIB_DIR/gpu.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+# shellcheck source=../lib/guest.sh
+source "$WB_LIB_DIR/guest.sh"
+# shellcheck source=../lib/lg.sh
+source "$WB_LIB_DIR/lg.sh"
+# shellcheck source=../lib/report.sh
+source "$WB_LIB_DIR/report.sh"
+
+SCOPE=all
+while (( $# )); do
+  case $1 in
+    --host)   SCOPE=host; shift ;;
+    --guest)  SCOPE=guest; shift ;;
+    --lg)     SCOPE=lg; shift ;;
+    --json)   WB_REPORT_JSON=1; shift ;;
+    --quiet)  WB_REPORT_QUIET=1; shift ;;
+    -h | --help)
+      sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'
+      echo >&2
+      echo '用法: winbox status [--host|--guest|--lg] [--json] [--quiet]' >&2
+      echo '退出码: 0 全绿 / 6 有警告 / 7 有故障 / 1 检查本身无法执行' >&2
+      exit 0 ;;
+    *) wb_fail 2 status "未知参数: $1" "winbox status --help" ;;
+  esac
+done
+export WB_REPORT_JSON WB_REPORT_QUIET
+
+wb_conf_load
+wb_report_reset
+
+VM=$(wb_conf_get_default WB_VM_NAME win11)
+GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
+AUDIO_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
+
+# ── 宿主：硬件与隔离 ──────────────────────────────────────────────────────
+if [[ $SCOPE == all || $SCOPE == host ]]; then
+  wb_report_section '宿主：硬件与隔离'
+
+  if [[ -z $GPU_BDF ]]; then
+    wb_report_item warn '未配置核显 BDF' '先跑 winbox detect --write'
+  else
+    if igpu=$(wb_detect_igpu "$GPU_BDF" 2>/dev/null); then
+      wb_report_item ok "核显在配置的地址上：$(head -1 <<< "$igpu" | cut -d' ' -f1-5)"
+    else
+      wb_report_item bad "配置的核显不存在：$GPU_BDF" '硬件变了？重跑 winbox detect --write'
+    fi
+
+    drv=$(wb_pci_driver "$GPU_BDF")
+    if [[ $drv == vfio-pci ]]; then
+      wb_report_item ok "核显驱动：vfio-pci（可以直通）"
+    elif [[ $drv == amdgpu ]]; then
+      wb_report_item bad "核显被 amdgpu 占用（应从宿主手里交出）" \
+        'sudo winbox reset-hook test 或 sudo winbox gpu-attach；仍不行则冷启动宿主'
+    else
+      wb_report_item warn "核显驱动：$drv" 'vmctl start 时 libvirt 会临时接管；持续如此请查 vfio 配置'
+    fi
+
+    if [[ -n $AUDIO_BDF ]]; then
+      adrv=$(wb_pci_driver "$AUDIO_BDF")
+      if [[ $adrv == vfio-pci ]]; then
+        wb_report_item ok "HDMI 音频功能驱动：vfio-pci"
+      else
+        wb_report_item warn "HDMI 音频功能驱动：$adrv（应从宿主手里交出）" \
+          '跟随核显一起绑定，见 docs/calltrees/03-vm-start-and-reset-hook.md'
+      fi
+    fi
+
+    iommu=$(wb_detect_iommu)
+    if [[ $iommu == enabled ]]; then
+      grp=$(wb_detect_iommu_group "$GPU_BDF" 2>/dev/null || echo '?')
+      peers=$(wb_detect_iommu_peers "$GPU_BDF" 2>/dev/null || true)
+      if [[ -z $peers ]]; then
+        wb_report_item ok "IOMMU 已启用；核显独占组 $grp"
+      else
+        wb_report_item warn "IOMMU 组 $grp 与其它设备共享" \
+          "$(tr '\n' ' ' <<< "$peers")（共享组会让直通不稳；需要 ACS 覆盖或换插槽）"
+      fi
+    else
+      wb_report_item bad 'IOMMU 未启用' '按文档加内核参数并重启：winbox host-prep'
+    fi
+  fi
+
+  wb_report_section '宿主：固件与模块'
+
+  romtool="$WB_ROOT/src/romtool/romtool"
+  vdir=$(wb_conf_get_default WB_VBIOS_DIR /var/lib/libvirt/vbios)
+  for pair in "GPU:$(wb_conf_get_default WB_VBIOS_GPU '')" "音频:$(wb_conf_get_default WB_VBIOS_AUDIO '')"; do
+    label=${pair%%:*}; name=${pair#*:}
+    [[ -n $name ]] || continue
+    f="$vdir/$name"
+    if [[ ! -f $f ]]; then
+      wb_report_item bad "$label ROM 不存在：$f" 'winbox rom dump 提取 → sudo winbox gpu-attach'
+      continue
+    fi
+    fp=$(wb_gpu_rom_fingerprint "$f" 2>/dev/null || true)
+    if [[ -x $romtool ]]; then
+      if "$romtool" verify "$f" >/dev/null 2>&1; then
+        wb_report_item ok "$label ROM 校验通过（$fp）"
+      else
+        wb_report_item bad "$label ROM 结构/校验和不合格（$fp）" "romtool info $f 看细节"
+      fi
+    else
+      # 没有 romtool 时退化为 ROM 头签名检查（只确认"像不像 ROM"）
+      if [[ $(head -c 2 "$f" | od -An -tx1 | tr -d ' \n') == 55aa ]]; then
+        wb_report_item ok "$label ROM 存在且签名正确（$fp）" '未构建 romtool，仅做了签名检查'
+      else
+        wb_report_item bad "$label ROM 缺少 55AA 签名：$f" '这不是一块 PCI ROM；重新提取'
+      fi
+    fi
+  done
+
+  case $(wb_kvmfr_state) in
+    ok)
+      size=$(wb_kvmfr_size_mb)
+      wb_report_item ok "KVMFR：$KVMFR_DEV 是字符设备${size:+（size=${size}MB）}" ;;
+    missing)
+      wb_report_item bad "$KVMFR_DEV 不存在（kvmfr 未加载）" 'sudo winbox lg-prepare' ;;
+    notchardev)
+      wb_report_item bad "$KVMFR_DEV 不是字符设备（曾被 QEMU 建成普通文件）" \
+        '关机后 rm -f /dev/kvmfr0 && modprobe kvmfr；再 winbox lg-shmem' ;;
+  esac
+
+  pstate=$(wb_lg_permissions_state)
+  case $pstate in
+    'apparmor=ok cgroup=ok')
+      wb_report_item ok '权限双闸（AppArmor + cgroup）已放行' ;;
+    *unknown*)
+      wb_report_item warn "权限状态未知：$pstate" 'qemu.conf 仅 root 可读；sudo winbox lg-shmem 确认' ;;
+    *)
+      wb_report_item bad "权限未放行：$pstate" 'sudo winbox lg-shmem（否则启动时报 EACCES/EPERM）' ;;
+  esac
+
+  # ── libvirt 与域定义 ────────────────────────────────────────────────────
+  wb_report_section 'libvirt 与域定义'
+  if ! wb_have_cmd virsh; then
+    wb_report_item bad '缺少 virsh' 'winbox host-prep'
+  elif ! state=$(virsh -c qemu:///system domstate "$VM" 2>/dev/null); then
+    wb_report_item bad "虚拟机不存在：$VM" 'winbox adopt 接管现有 VM，或 winbox vm-create 新建'
+  else
+    wb_report_item ok "虚拟机 $VM 状态：$state"
+    if [[ $state == *running* ]]; then
+      wb_report_item info 'VM 正在运行——域定义的检查仍可进行，但改动需先关机'
+    fi
+
+    tmp=$(mktemp)
+    if virsh -c qemu:///system dumpxml "$VM" > "$tmp" 2>/dev/null; then
+      argv=$(virsh -c qemu:///system domxml-to-native qemu-argv "$tmp" 2>/dev/null || true)
+      attached=$(wb_conf_get_default WB_GPU_ATTACHED 0)
+      shmem=$(wb_conf_get_default WB_SHMEM_ENABLED 0)
+      mode=$(wb_conf_get_default WB_VIDEO_MODE lg)
+
+      if [[ -z $argv ]]; then
+        wb_report_item warn '无法回读 QEMU 参数（domxml-to-native 不可用）'
+      else
+        if [[ $attached == 1 ]]; then
+          n=$(grep -o 'vfio-pci' <<< "$argv" | wc -l)
+          if (( n >= 2 )); then
+            wb_report_item ok "QEMU 参数含 $n 个 vfio-pci 设备（核显两功能）"
+          else
+            wb_report_item bad "QEMU 参数里 vfio-pci 设备只有 $n 个（期望 2）" 'winbox gpu-attach'
+          fi
+        fi
+        case $mode in
+          test | both)
+            # 注意真实 argv 里的形式是 JSON 属性 "x-vga":true（不是 x-vga=on）
+            grep -qE '"x-vga":(true|on|1)' <<< "$argv" \
+              && wb_report_item ok 'x-vga 已生效（核显是 Primary）' \
+              || wb_report_item bad 'x-vga 不在 QEMU 参数里' "winbox vm mode $mode" ;;
+        esac
+        case $mode in
+          lg | test)
+            # video=none 时 libvirt 根本不传虚拟显卡参数（不是 -vga none）——
+            # 所以判据是“没有 qufd/其它虚拟显卡”
+            if grep -qE 'qxl|virtio-vga|stdvga|[^-]VGA,vgamem|cirrus' <<< "$argv"; then
+              wb_report_item bad '仍存在虚拟显卡（期望 video=none）' "winbox vm mode $mode"
+            else
+              wb_report_item ok 'video=none 已生效（QEMU 未创建虚拟显卡）'
+            fi ;;
+          inspect | both)
+            grep -q 'qxl' <<< "$argv" \
+              && wb_report_item ok 'QXL 虚拟显卡已生效（取证模式）' \
+              || wb_report_item warn '未找到 QXL（取证模式应带虚拟显卡）' "winbox vm mode $mode" ;;
+        esac
+        if [[ $shmem == 1 ]]; then
+          if grep -q 'ivshmem-plain' <<< "$argv"; then
+            wb_report_item ok 'ivshmem-plain 已生效'
+            want=$(wb_conf_get_default WB_SHM_SIZE_MB 128)
+            want_bytes=$(( want * 1048576 ))
+            # argv 里被 shell 转义过（'\''size'\'':134217728），所以先在那一行里找数字
+            mbf=$(grep -m1 'memory-backend-file' <<< "$argv" || true)
+            if [[ $mbf == *"$want_bytes"* ]]; then
+              wb_report_item ok "共享内存尺寸与配置一致（${want}MB）"
+            elif [[ -z $mbf ]]; then
+              wb_report_item warn '未找到 memory-backend-file 参数，无法校验共享内存尺寸'
+            else
+              wb_report_item bad "共享内存尺寸与配置不一致（期望 ${want}MB）" \
+                'sudo winbox lg-shmem --size '"$want"'（尺寸不符时 LGMP 会握手失败）'
+            fi
+          else
+            wb_report_item bad 'ivshmem-plain 不在 QEMU 参数里（共享内存未挂上）' 'sudo winbox lg-shmem'
+          fi
+        fi
+      fi
+    fi
+    rm -f -- "$tmp"
+
+    hook_root=${WB_HOOK_ROOT:-/etc/libvirt/hooks}
+    hook_dir="$hook_root/qemu.d/$VM/prepare/begin"
+    hooks=$(find "$hook_dir" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' || true)
+    if [[ -z ${hooks// /} ]]; then
+      wb_report_item warn '复位轮回钩子未安装（VM 关机后需冷启动宿主才能再直通）' \
+        'sudo winbox reset-hook install'
+    elif [[ $hooks == *10-winbox-reset.sh* ]]; then
+      wb_report_item ok "复位轮回钩子已安装（winbox）：$hooks" \
+        "日志: ${WB_RESET_LOG:-/var/log/winbox-reset.log}"
+    else
+      wb_report_item ok "复位轮回钩子已安装：$hooks" \
+        '这不是 winbox 装的：旧钩子可能缺少 modprobe amdgpu 那一步（冷启动后会静默跳过复位）→ sudo winbox reset-hook install'
+    fi
+
+    snaps=$(virsh -c qemu:///system snapshot-list --name "$VM" 2>/dev/null | tr -d ' ' | sed '/^$/d' || true)
+    if [[ -n $snaps ]]; then
+      wb_report_item info "存在快照：$(tr '\n' ' ' <<< "$snaps")" \
+        '重定义域定义前会二次确认（磁盘链与快照元数据有耦合）'
+    fi
+  fi
+fi
+
+# ── Looking Glass ────────────────────────────────────────────────────────
+if [[ $SCOPE == all || $SCOPE == lg ]]; then
+  wb_report_section 'Looking Glass'
+  bin=$(wb_lg_client_bin)
+  if [[ -x $bin ]]; then
+    ver=$("$bin" --version 2>&1 | head -1 || true)
+    wb_report_item ok "客户端：$bin  ${ver:+（$ver）}"
+  else
+    wb_report_item bad "客户端未构建：$bin" 'sudo winbox lg-prepare'
+  fi
+
+  if pgrep -f 'looking-glass-client' >/dev/null 2>&1; then
+    wb_report_item ok '客户端进程正在运行'
+  else
+    wb_report_item info '客户端未在运行' 'winbox lg 启动窗口'
+  fi
+
+  ini="$HOME/.config/looking-glass/client.ini"
+  if [[ -f $ini ]]; then
+    if grep -q '^shmDevice=/dev/kvmfr0' "$ini"; then
+      wb_report_item ok 'client.ini 指向 /dev/kvmfr0'
+    else
+      wb_report_item bad 'client.ini 的 shmDevice 不是 /dev/kvmfr0' \
+        '留空会让 lgmp_deviceValidator 段错误；winbox lg --ini-reset 重置'
+    fi
+    if grep -q '^captureOnFocus=yes' "$ini"; then
+      wb_report_item ok '输入用抓取模式（多显示器必需）'
+    else
+      wb_report_item warn '未开抓取模式：多显示器下指针会跳到别的屏' 'winbox lg --ini-reset'
+    fi
+  else
+    wb_report_item info '尚无 client.ini' '首次 winbox lg 会自动生成'
+  fi
+fi
+
+# ── 客机 ──────────────────────────────────────────────────────────────────
+if [[ $SCOPE == all || $SCOPE == guest ]]; then
+  wb_report_section '客机'
+  if ! wb_guest_ready; then
+    wb_report_item warn '没有可用的客机 SSH 通道，跳过客机检查' \
+      '配置 WB_GUEST_USER/WB_GUEST_HOST/WB_GUEST_KEY 后重试（docs/zh/04-客机SSH直连通道.md）'
+  else
+    gpu_lines=$(wb_guest_gpu_lines 2>/dev/null || true)
+    if [[ -z $gpu_lines ]]; then
+      wb_report_item warn '客机没有返回显示适配器信息'
+    else
+      while IFS='|' read -r name status cec drv; do
+        [[ -n $name ]] || continue
+        case $name in
+          *Radeon* | *AMD*)
+            if [[ $status == OK && ${cec:-x} == 0 ]]; then
+              wb_report_item ok "客机核显：$name  Status=$status  ErrCode=$cec  驱动=$drv"
+            else
+              wb_report_item bad "客机核显：$name  Status=$status  ErrCode=$cec" \
+                '43/10 时看 docs/zh/01-核显直通-代码43排障全记录.md'
+            fi ;;
+          *) wb_report_item info "客机显示适配器：$name  Status=$status" ;;
+        esac
+      done <<< "$gpu_lines"
+    fi
+
+    idd_lines=$(wb_guest_idd_lines 2>/dev/null || true)
+    if [[ -n $idd_lines ]]; then
+      while IFS='|' read -r kind a b c; do
+        case $kind in
+          prefs)
+            if [[ $a == missing ]]; then
+              wb_report_item warn '客机未装 Looking Glass IDD（注册表无偏好项）' \
+                '客机运行 looking-glass-idd-setup.exe /S /ivshmem'
+            elif [[ $a == *ExclusiveMonitor=0* && $a == *ForceIndirectCopy=1* ]]; then
+              wb_report_item ok "IDD 偏好正确：$a|$b|$c"
+            else
+              wb_report_item bad "IDD 偏好不符合建议：$a|$b|$c" \
+                'winbox lg --idd-prefs（ExclusiveMonitor=0 / ForceIndirectCopy=1）'
+            fi ;;
+          dev) wb_report_item ok "IDD 虚拟显示器：$a  状态=$b" ;;
+          log) wb_report_item info "IDD 日志：$a" ;;
+        esac
+      done <<< "$idd_lines"
+    fi
+  fi
+fi
+
+rc=0
+wb_report_result || rc=$?
+exit "$rc"

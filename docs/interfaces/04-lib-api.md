@@ -198,6 +198,38 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `inspect` | `video-qxl` | off | QXL：在 SPICE 窗口里看客机内部（设备管理器/事件查看器） |
 | `both` | `video-qxl` | on | 双显示（实验组合） |
 
+## `lib/report.sh` — 分节报告与取证清单
+
+被 `status` / `evidence` 共用。两条设计：**报告即结果**（走 stdout，可 `| tee`/grep/贴进 issue）；
+**文本与 JSON 共用同一份缓冲**（`--json` 时不边跑边打印，最后一次性输出——两者永远描述同一件事）。
+
+| 函数 | 语义 |
+| --- | --- |
+| `wb_report_reset` | 清空计数与缓冲（每个命令开头调一次） |
+| `wb_report_section TITLE` | 起一节 |
+| `wb_report_item ok\|warn\|bad\|info TEXT [HINT]` | 一条检查项；未知 level 归为 info |
+| `wb_report_counts` | stdout = `ok=N warn=N bad=N info=N` |
+| `wb_report_result` | 打印结论并**返回** 0/6/7（不自己 exit——由 L1 决定是否把结论变退出码） |
+| `wb_evidence_manifest DIR` | 在目录里生成 `manifest.txt`（文件清单 + sha256 前 16 位 + 主机/内核） |
+
+**判定规则（唯一）**：任一 `bad` → `BROKEN`(7)；只有 `warn` → `DEGRADED`(6)；全 `ok` → `OK`(0)。
+
+### QEMU 参数回读的真实格式（踩过，写下来免得再错）
+
+`virsh domxml-to-native qemu-argv` 的输出与直觉不同，**两个曾经误判的点**：
+
+```
+# x-vga 是 hostdev 的 JSON 属性，不是 "x-vga=on"：
+{"driver":"vfio-pci","host":"0000:0d:00.0","id":"hostdev0","bus":"pci.15","x-vga":true}
+
+# video=none 时 libvirt **根本不传**虚拟显卡参数（不是 -vga none）：
+#   判据应为「没有 qxl / virtio-vga / stdvga 等」，而不是「有 vga=none」
+
+# qemu:commandline 里的参数会被 shell 转义，size 长这样：
+'\''size'\'':134217728
+#   校验尺寸应先取出含 memory-backend-file 的那一行再找数字，别直接 grep "size=…"
+```
+
 ## `lib/lg.sh` — Looking Glass 宿主侧
 
 | 函数 | 语义 | 失败 |

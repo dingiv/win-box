@@ -105,3 +105,29 @@ wb_guest_idd_status() {
     Select-Object ExclusiveMonitor,ForceIndirectCopy,ForceFullDirectCopy,DefaultRefresh,ExtraMode |
     Format-List'
 }
+
+# ── 供 status 解析的“一行一条”形式（人可读版本保留在上方）───────────────
+
+# 每行: <名字>|<Status>|<ConfigManagerErrorCode>|<驱动版本>
+wb_guest_gpu_lines() {
+  wb_guest_ps 'Get-CimInstance Win32_VideoController |
+    ForEach-Object { "$($_.Name)|$($_.Status)|$($_.ConfigManagerErrorCode)|$($_.DriverVersion)" }'
+}
+
+# 每行前缀式：
+#   prefs|ExclusiveMonitor=..|ForceIndirectCopy=..|ForceFullDirectCopy=..
+#   dev|<型号>|<状态>            （仅 IDD 虚拟显示器 ROOT\DISPLAY*）
+#   log|<最近一条含 mode= 的日志行>
+wb_guest_idd_lines() {
+  wb_guest_ps '$k="HKLM:\SOFTWARE\LookingGlass\IDD";
+    $p = Get-ItemProperty $k -ErrorAction SilentlyContinue;
+    if ($p) { "prefs|ExclusiveMonitor=$($p.ExclusiveMonitor)|ForceIndirectCopy=$($p.ForceIndirectCopy)|ForceFullDirectCopy=$($p.ForceFullDirectCopy)" } else { "prefs|missing" };
+    Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+      Where-Object { $_.InstanceId -like "ROOT\DISPLAY*" } |
+      ForEach-Object { "dev|$($_.FriendlyName)|$($_.Status)" };
+    $log="C:\ProgramData\Looking Glass (IDD)\looking-glass-idd.txt";
+    if (Test-Path $log) {
+      $m = Get-Content $log -Tail 300 | Select-String "mode=" | Select-Object -Last 1;
+      if ($m) { "log|" + $m.Line.Trim() }
+    }'
+}

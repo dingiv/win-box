@@ -347,13 +347,18 @@ wb_vm_verify_xml() {
     if (( n >= 2 )); then wb_ok "QEMU 参数含 $n 个 vfio-pci 设备（核显两功能）"
     else wb_warn "QEMU 参数里 vfio-pci 设备只有 $n 个（期望 2）"; fi
   fi
+  # 注：libvirt 把 x-vga 写成 JSON 属性 "x-vga":true；而 video=none 时
+  #     它**根本不传**虚拟显卡参数（不是 -vga none）——这两点踩过
   if [[ $mode == test || $mode == both ]]; then
-    grep -q 'x-vga=on' <<< "$argv" && wb_ok 'QEMU 参数含 x-vga=on' \
-      || wb_warn 'x-vga=on 不在 QEMU 参数里（模板/片段没生效？）'
+    grep -qE '"x-vga":(true|on|1)' <<< "$argv" && wb_ok 'QEMU 参数含 x-vga' \
+      || wb_warn 'x-vga 不在 QEMU 参数里（模板/片段没生效？）'
   fi
   if [[ $mode == lg || $mode == test ]]; then
-    grep -q '\-vga none\|vga=none' <<< "$argv" && wb_ok 'QEMU 参数含 vga=none' \
-      || wb_warn '未找到 vga=none'
+    if grep -qE 'qxl|virtio-vga|stdvga|[^-]VGA,vgamem|cirrus' <<< "$argv"; then
+      wb_warn 'QEMU 参数里仍有虚拟显卡（期望 video=none）'
+    else
+      wb_ok 'QEMU 未创建虚拟显卡（video=none）'
+    fi
   fi
   if [[ $shmem == 1 ]]; then
     grep -q 'ivshmem-plain' <<< "$argv" && wb_ok 'QEMU 参数含 ivshmem-plain' \

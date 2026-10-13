@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox evidence（scripts/bin/evidence）
+#
+# 契约：docs/interfaces/01-winbox-cli.md ／ 链路：docs/calltrees/05-status-and-evidence.md
+#
+# 采集一个"取证包"：宿主硬件/驱动/IOMMU/ROM/libvirt 定义/QEMU 参数/KVMFR/dmesg/复位日志/客机报告
+# + manifest（文件清单与 sha256）。目的只有一个：**排障时能把这个目录交给别人**，
+# 对方不需要你陪着敲命令。
+#
+# 两条设计：
+#   * 每项独立采集，任一项失败不影响其它项（缺 root 时 dmesg 之类降级为提示，不报错）
+#   * 运行中与关机后各采一次最有价值 —— 复位 bug 的特征正是"关机后设备状态被弄脏"，
+#     两份对比是唯一能直接看到这件事的证据（所以有 --after）
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/detect.sh
+source "$WB_LIB_DIR/detect.sh"
+# shellcheck source=../lib/pci.sh
+source "$WB_LIB_DIR/pci.sh"
+# shellcheck source=../lib/guest.sh
+source "$WB_LIB_DIR/guest.sh"
+# shellcheck source=../lib/lg.sh
+source "$WB_LIB_DIR/lg.sh"
+# shellcheck source=../lib/report.sh
+source "$WB_LIB_DIR/report.sh"
+
+AFTER=0
+OUT=''
+while (( $# )); do
+  case $1 in
+    --out)   [[ -n ${2:-} ]] || wb_fail 2 evidence "--out 需要目录" "winbox --help"; OUT=$2; shift 2 ;;
+    --after) AFTER=1; shift ;;
+    -h | --help)
+      sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 evidence "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+wb_conf_load
+VM=$(wb_conf_get_default WB_VM_NAME win11)
+GPU_BDF=$(wb_conf_get_default WB_GPU_BDF '')
+AUDIO_BDF=$(wb_conf_get_default WB_AUDIO_BDF '')
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+if [[ -z $OUT ]]; then
+  OUT="$WB_ROOT/logs/evidence-$STAMP$([[ $AFTER == 1 ]] && printf -- '-after')"
+fi
+mkdir -p -- "$OUT" || wb_fail 1 evidence "无法创建目录: $OUT" "docs/interfaces/01-winbox-cli.md"
+
+wb_log "== 采集到 $OUT =="
+if (( EUID != 0 )); then
+  wb_warn '非 root：dmesg 等项目会被跳过（要完整取证请 sudo winbox evidence）'
+fi
+
+# collect 文件名 命令…（失败也留下记录）
+collect() {
+  local name=$1
+  shift
+  {
+    printf '# %s\n# 命令: %s\n# 时间: %s\n\n' "$name" "$*" "$(date '+%F %T')"
+    "$@" 2>&1 || printf '\n[命令返回非零: %s]\n' "$?"
+  } > "$OUT/$name" || wb_warn "采集失败: $name"
+  wb_ok "$name"
+}
+
+# collect_shell 文件名 'shell 片段'
+collect_shell() {
+  local name=$1 script=$2
+  {
+    printf '# %s\n# 时间: %s\n\n' "$name" "$(date '+%F %T')"
+    bash -c "$script" 2>&1 || printf '\n[片段返回非零: %s]\n' "$?"
+  } > "$OUT/$name" || wb_warn "采集失败: $name"
+  wb_ok "$name"
+}
+
+# ── 1. 宿主硬件 ───────────────────────────────────────────────────────────
+if [[ -n $GPU_BDF ]]; then
+  collect 01-lspci.txt lspci -nnk -s "${GPU_BDF#0000:}"
+  collect 02-lspci-verbose.txt lspci -vvv -s "${GPU_BDF#0000:}"
+  [[ -n $AUDIO_BDF ]] && collect 03-lspci-audio.txt lspci -vvv -s "${AUDIO_BDF#0000:}"
+fi
+collect_shell 04-driver-binding.txt '
+  for d in /sys/bus/pci/devices/*/; do
+    c=$(cat "$d/class" 2>/dev/null) || continue
+    case $c in 0x03*|0x0403*) ;; *) continue ;; esac
+    b=$(basename "$d")
+    printf "%s  class=%s  driver=%s  override=%s  boot_vga=%s\n" \
+      "$b" "$c" \
+      "$([ -e "$d/driver" ] && basename "$(readlink -f "$d/driver")" || echo none)" \
+      "$(cat "$d/driver_override" 2>/dev/null)" \
+      "$(cat "$d/boot_vga" 2>/dev/null || echo -)"
+  done'
+
+# ── 2. IOMMU ──────────────────────────────────────────────────────────────
+collect_shell 05-iommu.txt '
+  echo "IOMMU: $(ls -A /sys/kernel/iommu_groups 2>/dev/null | wc -l) 个分组"
+  echo
+  for g in /sys/kernel/iommu_groups/*/; do
+    [ -d "$g" ] || continue
+    printf "组 %s: " "$(basename "$g")"
+    ls "$g/devices" 2>/dev/null | tr "\n" " "
+    echo
+  done'
+
+# ── 3. ROM ────────────────────────────────────────────────────────────────
+vdir=$(wb_conf_get_default WB_VBIOS_DIR /var/lib/libvirt/vbios)
+{
+  printf '# ROM 指纹与结构\n# 时间: %s\n\n' "$(date '+%F %T')"
+  printf 'ROM 目录: %s\n\n' "$vdir"
+  for f in "$vdir"/*.rom; do
+    [[ -f $f ]] || continue
+    if [[ -r $f ]]; then
+      printf '%s  size=%s  sha256=%s\n' "$(basename -- "$f")" "$(stat -c%s -- "$f")" "$(sha256sum -- "$f" | cut -c1-16)"
+      printf '  头两字节: %s\n' "$(head -c 2 "$f" | od -An -tx1 | tr -d ' \n')"
+    else
+      printf '%s  [不可读]\n' "$(basename -- "$f")"
+    fi
+  done
+  echo
+  if [[ -x "$WB_ROOT/src/romtool/romtool" ]]; then
+    echo '--- romtool info ---'
+    for f in "$vdir"/*.rom; do
+      [[ -r $f ]] || continue
+      echo "== $(basename -- "$f")"
+      "$WB_ROOT/src/romtool/romtool" info "$f" 2>&1 | sed 's/^/  /'
+    done
+  else
+    echo '（未构建 romtool；只有上面的签名/指纹级别信息）'
+  fi
+} > "$OUT/06-rom.txt" && wb_ok 06-rom.txt
+
+# ── 4. libvirt ────────────────────────────────────────────────────────────
+collect 07-libvirt-dumpxml.xml virsh -c qemu:///system dumpxml "$VM"
+{
+  printf '# QEMU 参数（QEMU 真正看到的）\n# 时间: %s\n\n' "$(date '+%F %T')"
+  tmp=$(mktemp)
+  if virsh -c qemu:///system dumpxml "$VM" > "$tmp" 2>/dev/null; then
+    virsh -c qemu:///system domxml-to-native qemu-argv "$tmp" 2>&1 | tr ' ' '\n' |
+      grep -nE 'vfio-pci|ivshmem|memory-backend-file|x-vga|vga|romfile|host=' || echo '(未匹配到关键参数)'
+  else
+    echo '读不到域定义'
+  fi
+  rm -f -- "$tmp"
+} > "$OUT/08-qemu-argv.txt" && wb_ok 08-qemu-argv.txt
+collect_shell 09-virsh-version.txt 'virsh --version; echo; qemu-system-x86_64 --version | head -1; echo; dpkg -l libvirt-daemon-system 2>/dev/null | tail -2'
+
+# ── 5. KVMFR / 复位 ───────────────────────────────────────────────────────
+{
+  printf '# KVMFR 状态\n# 时间: %s\n\n' "$(date '+%F %T')"
+  printf '设备状态: %s\n' "$(wb_kvmfr_state)"
+  printf '模块大小: %s\n' "$(wb_kvmfr_size_mb)"
+  printf '权限双闸: %s\n\n' "$(wb_lg_permissions_state)"
+  echo '--- 模块信息 ---'
+  lsmod | grep -E '^kvmfr' || echo '(模块未加载)'
+  echo
+  echo '--- 设备节点 ---'
+  ls -l /dev/kvmfr0 2>&1 || true
+  echo
+  echo '--- 模块参数（注：本版本可能不导出）---'
+  ls -l /sys/module/kvmfr/parameters 2>&1 || true
+  cat /sys/module/kvmfr/parameters/* 2>/dev/null || true
+  echo
+  echo '--- /etc/modprobe.d/kvmfr.conf ---'
+  cat /etc/modprobe.d/kvmfr.conf 2>&1 || true
+  echo
+  echo '--- /etc/modules-load.d/kvmfr.conf ---'
+  cat /etc/modules-load.d/kvmfr.conf 2>&1 || true
+} > "$OUT/10-kvmfr.txt" && wb_ok 10-kvmfr.txt
+
+{
+  printf '# 复位轮回日志\n# 时间: %s\n\n' "$(date '+%F %T')"
+  log=${WB_RESET_LOG:-/var/log/winbox-reset.log}
+  printf '日志: %s\n\n' "$log"
+  if [[ -r $log ]]; then tail -n 120 "$log"; else echo '(读不到：需要 root 或尚未产生)'; fi
+  echo
+  echo '--- dmesg: 复位相关 ---'
+  dmesg 2>/dev/null | grep -iE 'MODE2 reset|finishing device|vfio|amdgpu' | tail -40 || echo '(需要 root)'
+} > "$OUT/11-reset-hook.txt" && wb_ok 11-reset-hook.txt
+
+# ── 6. 内核消息 ───────────────────────────────────────────────────────────
+{
+  printf '# dmesg（GPU/IOMMU/vfio 相关）\n# 时间: %s\n\n' "$(date '+%F %T')"
+  dmesg 2>&1 | grep -iE 'amdgpu|vfio|iommu|kvmfr|ivshmem' | tail -200
+} > "$OUT/12-dmesg.txt" && wb_ok 12-dmesg.txt
+
+# ── 7. 版本 ───────────────────────────────────────────────────────────────
+{
+  printf '# 版本信息\n# 时间: %s\n\n' "$(date '+%F %T')"
+  printf 'win-box: %s\n' "$(cat "$WB_ROOT/VERSION" 2>/dev/null || echo '?')"
+  printf '内核   : %s\n' "$(uname -r)"
+  printf '发行版 : %s\n' "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+  printf 'libvirt: %s\n' "$(virsh --version 2>/dev/null || echo '?')"
+  printf 'QEMU   : %s\n' "$(qemu-system-x86_64 --version 2>/dev/null | head -1 || echo '?')"
+  printf 'kvmfr  : %s\n' "$(dkms status 2>/dev/null | grep kvmfr || echo '?')"
+  printf 'LG客户端: %s\n' "$(wb_lg_client_bin)"
+  [[ -x $(wb_lg_client_bin) ]] && "$(wb_lg_client_bin)" --version 2>&1 | head -3
+  echo
+  echo '--- 配置（脱敏：不含路径以外的个人信息）---'
+  winbox_conf=$(wb_conf_path)
+  if [[ -r $winbox_conf ]]; then sed -e 's/^\(WB_GUEST_KEY=\).*/\1<隐去>/' "$winbox_conf"; else echo "(读不到 $winbox_conf)"; fi
+} > "$OUT/13-versions.txt" && wb_ok 13-versions.txt
+
+# ── 8. 客机 ───────────────────────────────────────────────────────────────
+{
+  printf '# 客机报告\n# 时间: %s\n\n' "$(date '+%F %T')"
+  if ! wb_guest_ready; then
+    echo '(没有可用的 SSH 通道，跳过；配置 WB_GUEST_USER/WB_GUEST_HOST/WB_GUEST_KEY 后重采)'
+  else
+    echo '--- 显示适配器 ---'
+    wb_guest_gpu_lines 2>&1 || true
+    echo
+    echo '--- IDD ---'
+    wb_guest_idd_lines 2>&1 || true
+    echo
+    echo '--- IDD 日志尾部（判断白方块/Device Removed 的依据）---'
+    wb_guest_ps 'Get-Content "C:\ProgramData\Looking Glass (IDD)\looking-glass-idd.txt" -Tail 60 -ErrorAction SilentlyContinue' 2>&1 || true
+  fi
+} > "$OUT/14-guest.txt" && wb_ok 14-guest.txt
+
+wb_evidence_manifest "$OUT"
+wb_ok 'manifest.txt（文件清单 + sha256）'
+
+echo >&2
+wb_ok "取证包就绪：$OUT"
+wb_hint '排障时说清症状 + 把这个目录发出来即可（manifest 可校验内容）'
+if (( AFTER == 0 )); then
+  wb_hint '建议：VM 关机后再采一次（sudo winbox evidence --after）——两份对比最能看出复位问题'
+fi

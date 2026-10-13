@@ -140,7 +140,7 @@ check 'winbox --help' 0 "$WB_ROOT/scripts/bin/winbox" --help
 check 'winbox --version' 0 "$WB_ROOT/scripts/bin/winbox" --version
 check '未知选项 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" --nope
 check '未知命令 → 码 2' 2 "$WB_ROOT/scripts/bin/winbox" frobnicate
-check '未实现命令 → 码 1' 1 "$WB_ROOT/scripts/bin/winbox" status
+check '未实现命令 → 码 1' 1 "$WB_ROOT/scripts/bin/winbox" host-prep
 check 'winbox conf key=value 往返' 0 bash -c "
   '$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME=beta
   [[ \$('$WB_ROOT/scripts/bin/winbox' -c '$WB_CONF_PATH' conf WB_VM_NAME) == beta ]]"
@@ -460,6 +460,78 @@ check '未配置通道时 wb_guest_ready 返回 1 且不报错' 1 bash -c "
 check '客户端未构建时 winbox lg 报码 3' 3 bash -c "
   export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$TMP/render.conf' WB_LG_CLIENT='$TMP/no-such-client'
   '$WB_ROOT/scripts/bin/winbox' lg"
+
+printf '\n== 18. status 与 evidence（离线部分）==\n'
+rep_lib="export WB_ROOT='$WB_ROOT' WB_REPORT_QUIET=1; source '$WB_ROOT/scripts/lib/report.sh'; "
+check '报告全 ok → 返回 0' 0 bash -c "${rep_lib}wb_report_reset; wb_report_item ok '一切正常'; wb_report_result"
+check '报告有 warn → 返回 6' 6 bash -c "${rep_lib}wb_report_reset; wb_report_item ok a; wb_report_item warn b; wb_report_result"
+check '报告有 bad → 返回 7' 7 bash -c "${rep_lib}wb_report_reset; wb_report_item warn a; wb_report_item bad b; wb_report_result"
+check '报告计数正确' 0 bash -c "
+  ${rep_lib}wb_report_reset
+  wb_report_item ok a; wb_report_item warn b; wb_report_item bad c; wb_report_item info d
+  [[ \$(wb_report_counts) == 'ok=1 warn=1 bad=1 info=1' ]]"
+cat > "$TMP/json-check.sh" <<'EOS'
+export WB_ROOT="@WBR@"
+export WB_REPORT_JSON=1
+source "$WB_ROOT/scripts/lib/report.sh"
+wb_report_reset
+wb_report_item bad 'a"b' 'c"d'
+wb_report_item ok '第二项'
+wb_report_result > "$1" || true
+EOS
+sed -i "s|@WBR@|$WB_ROOT|" "$TMP/json-check.sh"
+bash "$TMP/json-check.sh" "$TMP/report.json"
+json_out=$(cat "$TMP/report.json")
+has 'JSON 里双引号被转义' "$json_out" 'a\"b'
+has 'JSON 里含 result 字段' "$json_out" '"result": "BROKEN"'
+lacks 'JSON 数组不以逗号开头（曾经的 bug）' "$json_out" '[,'
+lacks 'JSON 数组不以逗号结尾' "$json_out" ',]'
+lacks 'JSON 对象不以逗号开头' "$json_out" '{,'
+if command -v jq >/dev/null 2>&1; then
+  check 'JSON 能被 jq 解析' 0 jq -e . "$TMP/report.json"
+else
+  ok '（未安装 jq，跳过严格 JSON 解析）'
+fi
+
+mkdir -p "$TMP/manifest-test"
+printf 'a\n' > "$TMP/manifest-test/f1.txt"
+printf 'b\n' > "$TMP/manifest-test/f2.txt"
+check '取证清单生成' 0 bash -c "
+  ${rep_lib}wb_evidence_manifest '$TMP/manifest-test'"
+check '清单含两个文件与 sha256' 0 bash -c "
+  grep -q 'f1.txt' '$TMP/manifest-test/manifest.txt' &&
+  grep -q 'f2.txt' '$TMP/manifest-test/manifest.txt' &&
+  grep -qE '  [0-9a-f]{16} f1.txt' '$TMP/manifest-test/manifest.txt'"
+check '清单不把自身列进去' 0 bash -c "
+  ! grep -q '  manifest.txt' '$TMP/manifest-test/manifest.txt'"
+
+# status：本机真实环境（只读）；退出码只可能是 0/6/7
+out=$("$WB_ROOT/scripts/bin/winbox" status --host 2>&1); rc=$?
+if [[ $rc == 0 || $rc == 6 || $rc == 7 ]]; then
+  ok "winbox status --host 正常退出（码 $rc）"
+  has 'status 含分段标题' "$out" '== 宿主：硬件与隔离'
+  has 'status 用退出码承载结论' "$out" 'RESULT:'
+else
+  bad "winbox status --host 异常退出（码 $rc）"; printf '%s\n' "$out" | sed 's/^/      /'
+fi
+check 'status --json 输出结构正确' 0 bash -c "
+  out=\$('$WB_ROOT/scripts/bin/winbox' status --host --json 2>/dev/null || true)
+  [[ \$out == \{* ]] && [[ \$out == *\} ]] && grep -q '\"result\": ' <<< \"\$out\" && grep -q '\"sections\":' <<< \"\$out\""
+check '未配置 BDF 时报 warn 而非报错' 0 bash -c "
+  printf '%s\n' 'WB_VM_NAME=t1' 'WB_VM_UUID=11111111-2222-3333-4444-555555555555' \
+    'WB_VM_DISK=/tmp/x.qcow2' > '$TMP/status-min.conf'
+  out=\$(WB_CONF_PATH='$TMP/status-min.conf' '$WB_ROOT/scripts/bin/winbox' status --host 2>&1); rc=\$?
+  [[ \$rc == 6 || \$rc == 7 ]] && grep -q '未配置核显 BDF' <<< \"\$out\""
+
+EV="$TMP/ev"
+check 'evidence 采集（非 root 也应当成功）' 0 "$WB_ROOT/scripts/bin/winbox" evidence --out "$EV"
+check 'evidence 产出清单' 0 bash -c "[[ -f '$EV/manifest.txt' ]] && grep -q 'SHA256' '$EV/manifest.txt'"
+check 'evidence 产出关键文件' 0 bash -c "
+  for f in 04-driver-binding.txt 05-iommu.txt 10-kvmfr.txt 11-reset-hook.txt 13-versions.txt 14-guest.txt; do
+    [[ -f '$EV/'\$f ]] || { echo \"缺 \$f\"; exit 1; }
+  done"
+check 'evidence 不含私钥内容' 0 bash -c "
+  ! grep -rq 'PRIVATE KEY' '$EV' 2>/dev/null"
 
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"

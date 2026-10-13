@@ -50,12 +50,13 @@ need_root() {
 
 usage() {
   cat >&2 <<'EOF'
-用法: winbox reset-hook <install|remove|test|show>
+用法: winbox reset-hook <install|remove|test|show> [--takeover]
 
-  install   安装 prepare/begin 钩子（幂等；需 root）
-  remove    卸载钩子
-  test      手动执行一次钩子并显示日志尾部
-  show      显示钩子路径、内容与日志位置
+  install            安装 prepare/begin 钩子（幂等；需 root）
+  install --takeover 同时停用目录里其它旧钩子（它们会重复执行复位）
+  remove             卸载钩子
+  test               手动执行一次钩子并显示日志尾部
+  show               显示钩子路径、目录里现有的钩子与日志位置
 EOF
   exit "${1:-0}"
 }
@@ -94,6 +95,22 @@ case ${1:-} in
     need_root
     wb_step '1/3' "安装钩子 $HOOK"
     wb_run mkdir -p -- "$HOOK_DIR"
+
+    # 同一个 prepare/begin 目录里如果还有其它复位钩子，它们会与本钩子重复执行
+    # （每次启动多做一遍复位；无害但慢且难排查）——告知并提供 --takeover 移开
+    other=$(find "$HOOK_DIR" -maxdepth 1 -type f -executable ! -name "$(basename -- "$HOOK")" -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' || true)
+    if [[ -n ${other// /} ]]; then
+      if [[ ${2:-} == --takeover || ${1:-} == --takeover ]]; then
+        for f in $other; do
+          wb_run mv -- "$HOOK_DIR/$f" "$HOOK_DIR/$f.disabled"
+          wb_ok "已停用旧钩子: $f → $f.disabled"
+        done
+      else
+        wb_warn "该目录还有其它钩子（会重复复位）: $other"
+        wb_hint '要停用它们：sudo winbox reset-hook install --takeover'
+      fi
+    fi
+
     tmp=$(mktemp)
     hook_body > "$tmp"
     bash -n "$tmp" || { rm -f -- "$tmp"; wb_fail 1 reset-hook "生成的钩子语法错误" "docs/calltrees/03-vm-start-and-reset-hook.md"; }
@@ -143,11 +160,13 @@ case ${1:-} in
   show)
     wb_log "钩子: $HOOK"
     if [[ -e $HOOK ]]; then
-      wb_ok '已安装'
+      wb_ok '已安装（winbox 版本）'
       sed 's/^/  /' "$HOOK" >&2
     else
-      wb_warn '未安装'
+      wb_warn 'winbox 钩子未安装'
     fi
+    others=$(find "$HOOK_DIR" -maxdepth 1 -type f -executable -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' || true)
+    [[ -n ${others// /} ]] && wb_log "目录里的钩子: $others"
     wb_log "日志: $LOG"
     ;;
   -h | --help | help | '') usage 0 ;;
