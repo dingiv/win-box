@@ -50,17 +50,21 @@ Looking Glass 的 IDD 安装包。这些用脚本在你自己的机器上提取�
 
 ## 快速开始（目标流程）
 
+> ⚠ **当前进度**：下表前两步（`host-prep`、`vm-create`）**尚未实现**（契约已定，见
+> `docs/interfaces/`）；已实现的命令用 `scripts/bin/winbox --help` 里的 ★ 标记。
+> 已有虚拟机的路线（`adopt` → `gpu-attach` → `lg-*` → `status`）是完整可跑的。
+
 ```bash
 git clone --recurse-submodules <本仓库>
 cd win-box
 
 scripts/bin/winbox detect --write     # 1. 探测硬件与环境，生成 config/win-box.conf
 scripts/bin/winbox adopt              # 2.（已有 VM 时）接管它：提取身份信息到配置
-sudo scripts/bin/winbox host-prep     # 3. 宿主准备（依赖 / vfio / initramfs / 内核参数）→ 可能需重启
-scripts/bin/winbox vm-create          # 4. 建机（UEFI + TPM2），然后手工装 Windows
+sudo scripts/bin/winbox host-prep     # 3. 宿主准备 [未实现] 依赖 / vfio / initramfs / 内核参数
+scripts/bin/winbox vm-create          # 4. 建机 [未实现] UEFI + TPM2，然后手工装 Windows
 sudo scripts/bin/winbox gpu-attach    # 5. 把核显挂进去（ROM + 专属 root port + 显示模式）
 sudo scripts/bin/winbox lg-prepare    # 6. KVMFR 模块 + 构建 Looking Glass 客户端
-sudo scripts/bin/winbox lg-shmem      # 7. 把共享内存设备挂进虚拟机
+sudo scripts/bin/winbox lg-shmem      # 7. 共享内存设备 + 权限双闸
 sudo scripts/bin/winbox reset-hook install   # 8. 复位轮回钩子（免每次冷启动宿主）
 scripts/bin/winbox lg                 # 9. 开窗口
 ```
