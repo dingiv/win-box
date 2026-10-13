@@ -225,7 +225,9 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 | `wb_host_gpu_amdgpu_in_use` | 0/1：核显**自己的** DRM 卡有已连接输出，或有进程打开它的设备节点 |
 | `wb_host_gpu_vm_running` | 0/1 |
 | `wb_host_gpu_boot_units` | stdout = `unit名\|unit文件\|ExecStart脚本`——**已启用**、且脚本里提到 vfio-pci 的开机绑定脚本 |
-| `wb_host_gpu_disable_boot_units` | `--takeover` 时停用并归档它们（`systemctl disable --now` + unit 文件改名，**不删脚本**） |
+| `wb_host_gpu_disable_boot_units` | `--takeover` 时停用并归档它们（`systemctl disable --now` + unit 文件改名 `*.service.disabled-by-winbox`，**不删脚本**） |
+| `wb_host_gpu_archived_units` | stdout = `归档文件\|ExecStart脚本`——**只认我们自己加过标记的归档件**（系统自带的 unit 绝不出现） |
+| `wb_host_gpu_purge_archived_units` | 删除上述归档件及其脚本（受 `--dry-run` 控制）；顺带报告仍 enabled 的开机脚本 |
 | `wb_host_gpu_vfio_remove_ids` / `wb_host_gpu_vfio_add_ids` | 运行时增删 vfio-pci 的动态 ID（见下面第 4 条事实） |
 | `wb_host_gpu_config_passthrough` | 持久化写直通姿态；返回 **0 = 有改动 / 1 = 无需改动 / ≥2 = 失败** |
 | `wb_host_gpu_config_host [--takeover]` | 持久化撤掉直通姿态（有冲突时不给 `--takeover` 就报码 3） |
@@ -254,7 +256,9 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 
 **本工具不引入 systemd 服务**（用户明确要求：只探测、尽力配置、达不到就如实说明目标状态并交给用户）。
 开机阶段的绑定若由"别人的脚本"负责（unit 的 ExecStart 脚本提到 vfio-pci 且处于 enabled），
-它会被当作**冲突**报出：默认只报告，`--takeover` 才停用并归档。
+它会被当作**冲突**报出：默认只报告，`--takeover` 才停用并归档；
+彻底删除用 `winbox host-gpu purge`（只删带我们归档标记的，**系统自带的 `gpu-manager.service`
+这类绝不会被识别成归档件**——测试里有断言钉住这一点）。
 
 **可测性**：`WB_HOST_GPU_DIR` / `WB_HOST_GPU_MANAGED` / `WB_HOST_GPU_MODFILE` / `WB_HOST_GPU_LOADFILE` /
 `WB_HOST_GPU_SYSTEMD` 均可覆盖 → 冒烟测试用样本目录离线验证判定、冲突检测与开机脚本探测，不碰真实 `/etc`。

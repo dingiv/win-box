@@ -434,6 +434,11 @@ wb_host_gpu_vfio_add_ids() {
 
 WB_HOST_GPU_SYSTEMD=${WB_HOST_GPU_SYSTEMD:-/etc/systemd/system}
 
+# 要扫描的 systemd 目录（去重；WB_HOST_GPU_SYSTEMD 可覆盖，测试用）
+wb_host_gpu__systemd_dirs() {
+  printf '%s\n' "$WB_HOST_GPU_SYSTEMD" /etc/systemd/system /usr/lib/systemd/system | awk '!seen[$0]++'
+}
+
 # unit 是否处于启用状态：先看 .wants 软链（文件系统判据 —— 可测、且不依赖 systemd 运行），
 # 再退回问 systemctl（覆盖 enable --now 到别的 target 之类的情况）
 wb_host_gpu__unit_enabled() {
@@ -453,7 +458,7 @@ wb_host_gpu__unit_enabled() {
 wb_host_gpu_boot_units() {
   local d u ex
   # 目录去重：WB_HOST_GPU_SYSTEMD 默认就是 /etc/systemd/system，写死再列一遍会报两次（踩过）
-  for d in $(printf '%s\n' "$WB_HOST_GPU_SYSTEMD" /etc/systemd/system /usr/lib/systemd/system | awk '!seen[$0]++'); do
+  for d in $(wb_host_gpu__systemd_dirs); do
     [[ -d $d ]] || continue
     for u in "$d"/*.service; do
       [[ -f $u ]] || continue
@@ -464,6 +469,48 @@ wb_host_gpu_boot_units() {
       printf '%s|%s|%s\n' "$(basename -- "$u")" "$u" "$ex"
     done
   done
+  return 0
+}
+
+# 被我们归档过的 unit（'*.disabled-by-winbox'）：stdout 每行 <归档文件>|<ExecStart脚本>
+# 只认我们自己的归档标记 —— 系统自带的服务绝不会出现在这里
+wb_host_gpu_archived_units() {
+  local d f ex
+  for d in $(wb_host_gpu__systemd_dirs); do
+    for f in "$d"/*.service.disabled-by-winbox; do
+      [[ -f $f ]] || continue
+      ex=$(awk -F= '/^[[:space:]]*ExecStart=/{print $2; exit}' "$f" 2>/dev/null | awk '{print $1}')
+      printf '%s|%s\n' "$f" "${ex:-}"
+    done
+  done
+  return 0
+}
+
+# 删除归档 unit 与它引用的脚本（仅限上面探测到的；dry-run 下只打印）
+wb_host_gpu_purge_archived_units() {
+  local f ex found=0
+  while IFS='|' read -r f ex; do
+    [[ -n $f ]] || continue
+    found=1
+    if wb_is_dry_run; then
+      # 干跑只列清单，**不能**打印"已删除"（否则就是另一种假成功）
+      [[ -n $ex && $ex == /* ]] && wb_log "  [dry-run] 将删除脚本: $ex"
+      wb_log "  [dry-run] 将删除归档 unit: $f"
+      continue
+    fi
+    if [[ -n $ex && $ex == /* && -f $ex ]]; then
+      rm -f -- "$ex" && wb_ok "已删除脚本: $ex"
+    elif [[ -n $ex ]]; then
+      wb_log "  （脚本不存在或路径可疑，保留: $ex）"
+    fi
+    rm -f -- "$f" && wb_ok "已删除归档 unit: $f"
+  done < <(wb_host_gpu_archived_units)
+  (( found )) || wb_ok '没有我们归档过的 unit（无需清理）'
+  # 顺手报告仍然处于启用状态的开机脚本（不在本函数的职责内，只提醒）
+  local live
+  live=$(wb_host_gpu_boot_units)
+  [[ -n $live ]] && wb_warn '仍有处于 enabled 的开机绑定脚本（先用 host-gpu host --takeover 停用，再 purge）'
+  if ! wb_is_dry_run; then wb_run systemctl daemon-reload >/dev/null 2>&1 || true; fi
   return 0
 }
 

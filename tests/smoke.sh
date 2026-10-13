@@ -786,6 +786,31 @@ check '无配置时 vm render 报码 3（缺身份，而不是崩）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" vm render
 check '无配置时 host-gpu 真跑报码 3（缺 BDF）' 3 \
   env WB_CONF_PATH="$NOCONF" "$WB_ROOT/scripts/bin/winbox" host-gpu passthrough
+printf '\n== 27. host-gpu purge：只删"我们归档过的"，不碰系统自带 ==\n'
+PSD="$TMP/purge-sysd"
+mkdir -p "$PSD"
+printf '%s\n' '#!/bin/sh' 'echo vfio-pci > /sys/x' > "$TMP/arch-script.sh"
+chmod +x "$TMP/arch-script.sh"
+printf '%s\n' '[Service]' "ExecStart=$TMP/arch-script.sh" > "$PSD/old-bind.service.disabled-by-winbox"
+printf '%s\n' '[Service]' "ExecStart=/usr/lib/systemd/system/gpu-manager" > "$PSD/gpu-manager.service"   # 系统自带样式：没有我们的标记
+purge_lib="export WB_ROOT='$WB_ROOT' WB_HOST_GPU_SYSTEMD='$PSD'; source '$WB_ROOT/scripts/lib/host.sh'; "
+
+out=$(env WB_HOST_GPU_SYSTEMD="$PSD" bash -c "${purge_lib}wb_host_gpu_archived_units")
+has '探测到我们归档的 unit' "$out" 'old-bind.service.disabled-by-winbox'
+lacks '系统自带的 service 不会被当成归档件' "$out" 'gpu-manager.service'
+
+# 干跑：只打印，不删
+dryout=$(env WB_DRY_RUN=1 WB_HOST_GPU_SYSTEMD="$PSD" bash -c "${purge_lib}wb_host_gpu_purge_archived_units" 2>&1)
+check '干跑 purge 不删任何文件' 0 bash -c "[[ -f '$PSD/old-bind.service.disabled-by-winbox' && -f '$TMP/arch-script.sh' ]]"
+has '干跑 purge 列出将删的东西' "$dryout" '[dry-run] 将删除'
+lacks '干跑 purge 不谎报已删除' "$dryout" '已删除'
+# 真删（在夹具目录里，不需要 root）
+env WB_HOST_GPU_SYSTEMD="$PSD" bash -c "${purge_lib}wb_host_gpu_purge_archived_units" >/dev/null 2>&1
+check 'purge 删掉归档 unit 与它的脚本' 0 bash -c "
+  [[ ! -e '$PSD/old-bind.service.disabled-by-winbox' && ! -e '$TMP/arch-script.sh' ]]"
+check 'purge 不碰系统自带的 service' 0 bash -c "[[ -f '$PSD/gpu-manager.service' ]]"
+check '无归档件时 purge 不报错' 0 bash -c "${purge_lib}wb_host_gpu_purge_archived_units"
+
 printf '\n== 26. 报告值必须与实际一致（曾经输出过错误的 amdgpu_loaded）==\n'
 # 曾经的 bug：`lsmod | grep -q` 在 pipefail 下因 SIGPIPE(141) 永远判失败 →
 # amdgpu_loaded 恒为 no。现在改成直接读 /proc/modules，并与实际对拍。

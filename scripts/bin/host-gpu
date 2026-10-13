@@ -43,11 +43,13 @@ shift || true
 while (( $# )); do
   case $1 in
     --takeover) TOKEOVER=--takeover; shift ;;
+    --purge)    ACTION=purge; shift ;;
     -h | --help)
       sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
       echo >&2
-      echo "用法: winbox host-gpu [status|passthrough|host] [--takeover]" >&2
-      echo '  --takeover  把"别人文件里"的直通配置注释掉（改前备份，逐条打印）' >&2
+      echo "用法: winbox host-gpu [status|passthrough|host|purge] [--takeover]" >&2
+      echo '  --takeover  处理冲突：注释别人文件里的 ids=/softdep，停用并归档遗留的开机绑定脚本' >&2
+      echo '  --purge     删除我们归档过的 unit（*.disabled-by-winbox）及其 ExecStart 脚本' >&2
       echo '退出码: 0 成功 / 1 失败 / 2 用法 / 3 前置不满足 / 5 需要重启' >&2
       exit 0 ;;
     *) wb_fail 2 host-gpu "未知参数: $1" "winbox host-gpu --help" ;;
@@ -88,6 +90,12 @@ show_status() {
 
 case $ACTION in
   status | '') show_status; exit 0 ;;
+  purge)
+    # 只清理"我们归档过的"遗留：系统自带的服务绝不会被这里碰到
+    if ! wb_is_dry_run; then wb_require_root; fi
+    wb_log '== 清理我们归档过的遗留 unit =='
+    wb_host_gpu_purge_archived_units
+    exit 0 ;;
   passthrough | host) ;;
   *) wb_fail 2 host-gpu "未知动作: $ACTION（status|passthrough|host）" "winbox host-gpu --help" ;;
 esac

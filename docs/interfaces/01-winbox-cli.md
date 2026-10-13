@@ -170,6 +170,9 @@ winbox [全局选项] <command> [command 选项]
   **显式 bind** → 校验）；**验证通过即退出 0**，不因为"碰了持久化配置"就要求重启
 - **不引入 systemd 服务**：只**探测**"别人的开机绑定脚本"（unit 的 ExecStart 脚本提到 vfio-pci 且已启用），
   默认只报告；`--takeover` 才 `systemctl disable --now` 并归档 unit 文件（脚本本体不删）
+- `winbox host-gpu purge`：**删除我们归档过的** unit（`*.service.disabled-by-winbox`）及其 `ExecStart` 脚本。
+  只认自己的归档标记，系统自带的服务（如 Ubuntu 的 `gpu-manager.service`）绝不会被碰到；
+  `--dry-run` 只列出将删除的文件
 - **生命周期**：幂等——已在该驱动上就跳过；没有持久化改动时明确说"无需重启" 
 - **为什么"只删黑名单"不够**、**为什么内核参数不用动**：见 `04-lib-api.md` 的 `lib/host.sh` 一节
 
