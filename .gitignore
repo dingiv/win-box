@@ -26,7 +26,6 @@ config/*.tmp
 
 # C 构建产物
 src/**/*.o
-src/**/romtool
 
 # 编辑器
 *~
@@ -38,6 +37,8 @@ __pycache__/
 
 # C 工具的构建与测试产物
 src/romtool/tests/tmp/
+
+# 只忽略构建产物本身（写成 src/**/romtool 会连源码目录一起忽略——踩过）
 src/romtool/romtool
 src/romtool/tests/mkrom
 src/romtool/*.o

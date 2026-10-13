@@ -595,6 +595,39 @@ check 'C 的二进制与对象文件未被跟踪' 0 bash -c "
 check '测试临时目录未被跟踪' 0 bash -c "
   cd '$WB_ROOT' && ! git ls-files | grep -q 'src/romtool/tests/tmp/'"
 
+# 这条是"防误伤"的核心断言：曾经 .gitignore 里写成 `src/**/romtool`，
+# 本意忽略那个二进制，结果把整个源码目录一起忽略了 —— 1536 行 C 从未被提交，
+# 而当时的"产物未被跟踪"断言是**空过**的（全被忽略 ⇒ 什么都没匹配到）。
+cat > "$TMP/trackcheck.sh" <<'EOS'
+set -u
+cd "$1" || exit 1
+miss=$(find . \
+  -path ./.git -prune -o -path ./third_party -prune -o -path ./logs -prune -o \
+  -path '*/tests/tmp' -prune -o \
+  \( -name '*.sh' -o -name '*.c' -o -name '*.h' -o -name '*.md' -o -name 'Makefile' \
+     -o -name '*.ps1' -o -name '*.in' -o -name '.gitignore' -o -name '.gitattributes' \
+     -o -name '.gitmodules' -o -name 'LICENSE' \) -type f -print \
+  | sed 's|^\./||' \
+  | while IFS= read -r f; do git ls-files --error-unmatch "$f" >/dev/null 2>&1 || echo "$f"; done)
+if [ -n "$miss" ]; then
+  echo "以下源码/配置没有被 git 跟踪（.gitignore 误伤？）:"
+  printf '%s\n' "$miss" | sed 's/^/  /'
+  exit 1
+fi
+exit 0
+EOS
+check '所有源码/配置都被 git 跟踪（.gitignore 没有误伤）' 0 sh "$TMP/trackcheck.sh" "$WB_ROOT"
+check 'romtool 的 C 源码确实入库' 0 bash -c "
+  cd '$WB_ROOT'
+  for f in src/romtool/romtool.c src/romtool/rom.c src/romtool/rom.h \
+           src/romtool/sha256.c src/romtool/sha256.h src/romtool/Makefile \
+           src/romtool/tests/mkrom.c src/romtool/tests/run.sh src/romtool/README.md; do
+    git ls-files --error-unmatch \"\$f\" >/dev/null 2>&1 || { echo \"未跟踪: \$f\"; exit 1; }
+  done"
+check '构建产物仍被忽略（不该入库）' 0 bash -c "
+  cd '$WB_ROOT'
+  git check-ignore -q src/romtool/romtool && git check-ignore -q src/romtool/tests/mkrom"
+
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"
 (( FAIL == 0 )) || exit 1
