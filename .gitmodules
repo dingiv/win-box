@@ -1,0 +1,20 @@
+# 上游源码以 submodule 钉住 commit（不用 vendored 拷贝，保持出处清晰）
+#
+# 钉点的选取原则：**复现被验证过的状态**。这些 SHA 是 win-box 的参考环境实际使用的版本
+# （客户端 B7-829-cdba29f2 即对应 LookingGlass 的 cdba29f）。
+# 升级 submodule 时应同时更新本文件的注释、docs/zh/ 里的版本记录与客户端构建验证。
+
+[submodule "third_party/LookingGlass"]
+	path = third_party/LookingGlass
+	url = https://github.com/gnif/LookingGlass.git
+	# cdba29f — KVMFR 模块 + 客户端 + IDD 的源码；客户端构建与 IDD 安装包都出自它
+
+[submodule "third_party/ryzen-gpu-passthrough-proxmox"]
+	path = third_party/ryzen-gpu-passthrough-proxmox
+	url = https://github.com/isc30/ryzen-gpu-passthrough-proxmox.git
+	# 9c62cb5 — 参考配方（UEFI 下核显直通代码 43 的修复路径 + ROM 对）
+
+[submodule "third_party/VBIOS-Dumper"]
+	path = third_party/VBIOS-Dumper
+	url = https://github.com/D800/VBIOS-Dumper-amd-Raphael-iGPU.git
+	# 1d6557a — AMD Raphael/Granite Ridge 核显 VBIOS 提取参考实现（现由 src/romtool 取代）
