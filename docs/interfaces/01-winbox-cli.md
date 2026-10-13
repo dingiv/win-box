@@ -91,12 +91,13 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 3 = VM 运行中 / ROM 不存在 / 非 root 且需部署；码 4 = 配置的核显 BDF 在当前硬件上不存在
 - **生命周期**：幂等（模板渲染天然幂等）；改前自动备份 XML 到 `logs/`，改后打印前后 diff
 
-#### `winbox lg-prepare [--size MB]`
+#### `winbox lg-prepare [--size MB] [--skip-deps] [--skip-kvmfr] [--skip-build]`
 
-- **输入**：共享内存大小（默认 128）
-- **输出**：DKMS 装 kvmfr、模块参数/开机加载/udev 权限、从 submodule 源码构建客户端到 `~/.local/bin`
-- **失败**：码 3 = submodule 未初始化（提示 `git submodule update --init`）；码 1 = 构建失败
-- **生命周期**：幂等；**拒绝在 VM 运行中执行**（QEMU 会把 `/dev/kvmfr0` 创造成普通文件，事后难修）
+- **输入**：共享内存大小（默认 `WB_SHM_SIZE_MB`）、跳过开关
+- **输出**：构建依赖 → KVMFR 模块（DKMS + 模块参数 + 开机加载 + udev 权限）→ 构建客户端到 `$HOME/.local/bin`
+- **失败**：码 3 = submodule 未初始化 / 缺构建依赖；码 1 = DKMS 或编译失败
+- **sudo**：前两步需 root，**构建不需要** —— 非 root 时自动跳过前两步（明确告知），而不是整个失败
+- **生命周期**：幂等（依赖逐包检查、已构建的客户端不重建）
 
 #### `winbox lg-shmem [--size MB] [--remove]`
 
@@ -112,12 +113,14 @@ winbox [全局选项] <command> [command 选项]
 - **失败**：码 3 = 非 root；`test` 时若 amdgpu 未能绑定 → 码 5（提示需冷启动）
 - **生命周期**：幂等；钩子本体**永远 exit 0**（绝不阻塞 VM 启动）
 
-#### `winbox lg [--] [客户端参数…]`
+#### `winbox lg [--idd-prefs|--ini-reset] [客户端参数…]`
 
-- **输入**：透传给 Looking Glass 客户端的参数
+- **输入**：透传给 Looking Glass 客户端的参数；两个特殊开关：
+  `--idd-prefs` = 只应用客机 IDD 偏好（ExclusiveMonitor=0 / ForceIndirectCopy=1 / ForceFullDirectCopy=0 + 重载驱动）；
+  `--ini-reset` = 强制重写 `client.ini`
 - **输出**：前台窗口（Ctrl+C 结束）
-- **失败**：码 3 = 客户端未构建 / `/dev/kvmfr0` 不存在
-- **生命周期**：前台进程；首次运行生成 `~/.config/looking-glass/client.ini`（已存在则不覆盖）
+- **失败**：码 3 = 客户端未构建 / 无 SSH 通道（仅 `--idd-prefs` 时）
+- **生命周期**：前台进程；首次运行生成 `~/.config/looking-glass/client.ini`（已存在**不覆盖**——使用者手改的配置不能被脚本重置）
 
 #### `winbox rom <子命令>`
 

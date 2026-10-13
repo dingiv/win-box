@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox lg-shmem（scripts/bin/lg-shmem）
+#
+# 链路：docs/calltrees/04-lg-chain.md
+#
+# 把 KVMFR 共享内存挂进虚拟机：检查设备 → 放行两层权限 → 模板里打开共享内存片段 → 重定义。
+#
+# 为什么权限要在这一步做：QEMU 打开 /dev/kvmfr0 作为内存后端时，
+#   AppArmor 未放行 → EACCES（"Permission denied"）
+#   cgroup 设备白名单未登记 → EPERM（"Operation not permitted"）
+# 两个都是"到启动那一刻才暴露"的错，所以提前在准备阶段修掉。
+#
+# 用法：
+#   sudo winbox lg-shmem              # 用配置里的大小
+#   sudo winbox lg-shmem --size 64
+#   sudo winbox lg-shmem --remove
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/lg.sh
+source "$WB_LIB_DIR/lg.sh"
+# shellcheck source=../lib/xml.sh
+source "$WB_LIB_DIR/xml.sh"
+
+wb_conf_load
+
+SIZE='' REMOVE=0
+while (( $# )); do
+  case $1 in
+    --size)   [[ -n ${2:-} ]] || wb_fail 2 lg-shmem "--size 需要 MB 数" "winbox --help"; SIZE=$2; shift 2 ;;
+    --remove) REMOVE=1; shift ;;
+    -h | --help)
+      sed -n '4,16p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 lg-shmem "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+if (( REMOVE )); then
+  wb_log '== 移除共享内存设备 =='
+  wb_vm_detach_shmem
+  wb_ok '已从模板中移除共享内存片段（KVMFR 模块与 /dev/kvmfr0 保持不动）'
+  exit 0
+fi
+
+wb_step '1/4' '前置检查'
+wb_xml_require_stopped
+wb_log "    VM: $(wb_conf_get_default WB_VM_NAME win11)（已关机）"
+
+wb_step '2/4' 'KVMFR 设备'
+wb_kvmfr_check
+mod_size=$(wb_kvmfr_size_mb)
+cfg_size=$(wb_conf_get_default WB_SHM_SIZE_MB 128)
+size=${SIZE:-$cfg_size}
+wb_ok "$KVMFR_DEV 就绪（模块: $(ls -l "$KVMFR_DEV" | awk '{print $1, $3 ":" $4}')）"
+if [[ -z $mod_size ]]; then
+  wb_warn '读不到模块的 static_size_mb（本版本不导出该参数）——跳过大小时一致性校验'
+  wb_hint "请确保配置的 ${size}MB 与模块加载时用的一致（lg-prepare --size）"
+elif [[ $mod_size != "$size" ]]; then
+  wb_fail 3 lg-shmem "尺寸不一致：模块 static_size_mb=$mod_size，本次要挂 ${size}MB（LGMP 会握手失败）" \
+    "docs/calltrees/04-lg-chain.md"
+fi
+wb_log "    共享内存: ${size}MB"
+
+wb_step '3/4' '权限双闸（AppArmor + cgroup）'
+state=$(wb_lg_permissions_state)
+if [[ $state == 'apparmor=ok cgroup=ok' ]]; then
+  wb_ok "两层都已放行（$state）"
+elif (( EUID == 0 )); then
+  wb_log "    当前: $state（幂等地补齐）"
+  wb_lg_permissions_fix
+elif [[ $state == *'=unknown'* ]]; then
+  wb_fail 3 lg-shmem "无法确认权限状态（$state）——qemu.conf 仅 root 可读：sudo winbox lg-shmem${SIZE:+ --size $SIZE}" \
+    "docs/calltrees/04-lg-chain.md"
+else
+  wb_fail 3 lg-shmem "权限未放行（$state）——需要 root：sudo winbox lg-shmem${SIZE:+ --size $SIZE}" \
+    "docs/calltrees/04-lg-chain.md"
+fi
+
+wb_step '4/4' '写配置并重定义域（模板渲染）'
+wb_vm_attach_shmem "$size"
+
+wb_ok "共享内存已挂进 VM（${size}MB → /dev/kvmfr0）"
+wb_hint '下一步: winbox vm start && winbox lg'
+wb_hint '客机侧一次性动作：装 Looking Glass IDD（/S /ivshmem）→ winbox lg --idd-prefs'

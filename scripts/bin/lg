@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox lg（scripts/bin/lg）
+#
+# 链路：docs/calltrees/04-lg-chain.md
+#
+# 启动 Looking Glass 客户端；首次运行会生成 ~/.config/looking-glass/client.ini
+# （已存在则不覆盖——使用者手改过的配置不能被脚本重置）。
+#
+# 常用交互：
+#   * 鼠标移进窗口即可用（IDD 直连输入）
+#   * ScrLk 进入/退出抓取模式（多显示器下必须用抓取模式，否则指针会跳到别的屏）
+#   * ScrLk + = 请求把客机分辨率设成当前窗口大小
+#
+# 用法：
+#   winbox lg                      # 普通窗口
+#   winbox lg -F                   # 全屏
+#   winbox lg --idd-prefs          # 只应用客机 IDD 偏好（需 SSH 通道），不启动客户端
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/guest.sh
+source "$WB_LIB_DIR/guest.sh"
+# shellcheck source=../lib/lg.sh
+source "$WB_LIB_DIR/lg.sh"
+
+wb_conf_load
+
+case ${1:-} in
+  -h | --help)
+    sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//'
+    wb_log ''
+    wb_log '客户端自身参数（透传）：'
+    bin=$(wb_lg_client_bin)
+    [[ -x $bin ]] && "$bin" --help 2>&1 | head -40 | sed 's/^/  /' >&2
+    exit 0 ;;
+  --idd-prefs)
+    wb_log '== 应用客机 IDD 偏好 =='
+    wb_idd_prefs_apply
+    wb_ok '完成'
+    wb_hint '判据：IDD 日志出现 "Forcing indirect transport copies" 且 "Frame graph ... mode=hw"'
+    wb_hint '日志位置（客机内）: C:\ProgramData\Looking Glass (IDD)\looking-glass-idd.txt'
+    exit 0 ;;
+  --ini-reset)
+    wb_lg_client_ini_write --force
+    exit 0 ;;
+esac
+
+# 其余参数全部透传给客户端
+wb_lg_run "$@"

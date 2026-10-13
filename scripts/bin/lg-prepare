@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# code-master:title win-box · winbox lg-prepare（scripts/bin/lg-prepare）
+#
+# 链路：docs/calltrees/04-lg-chain.md
+#
+# 宿主侧一次性准备：构建依赖 → KVMFR 模块 → 构建 Looking Glass 客户端。
+# 前两步要 root；第三步不需要 —— 所以非 root 时会跳过前两步并明确告知，而不是整个失败。
+#
+# 用法：
+#   sudo winbox lg-prepare                 # 全部
+#   sudo winbox lg-prepare --size 64       # 共享内存按 1440p 设 64MB
+#   winbox lg-prepare --skip-kvmfr         # 只构建客户端（不需要 root）
+set -euo pipefail
+
+WB_ROOT=${WB_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
+WB_LIB_DIR=${WB_LIB_DIR:-$WB_ROOT/scripts/lib}
+# shellcheck source=../lib/log.sh
+source "$WB_LIB_DIR/log.sh"
+# shellcheck source=../lib/sys.sh
+source "$WB_LIB_DIR/sys.sh"
+# shellcheck source=../lib/conf.sh
+source "$WB_LIB_DIR/conf.sh"
+# shellcheck source=../lib/lg.sh
+source "$WB_LIB_DIR/lg.sh"
+
+wb_conf_load
+
+SIZE='' SKIP_DEPS=0 SKIP_KVMFR=0 SKIP_BUILD=0
+while (( $# )); do
+  case $1 in
+    --size)       [[ -n ${2:-} ]] || wb_fail 2 lg-prepare "--size 需要 MB 数" "winbox --help"; SIZE=$2; shift 2 ;;
+    --skip-deps)  SKIP_DEPS=1; shift ;;
+    --skip-kvmfr) SKIP_KVMFR=1; shift ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    -h | --help)
+      sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) wb_fail 2 lg-prepare "未知参数: $1" "winbox --help" ;;
+  esac
+done
+
+is_root=0
+(( EUID == 0 )) && is_root=1
+
+# ── 1) 依赖 ───────────────────────────────────────────────────────────────
+wb_step '1/3' '构建依赖'
+if (( SKIP_DEPS )); then
+  wb_log '  （按参数跳过）'
+elif (( is_root )); then
+  wb_lg_deps_install
+else
+  wb_warn '非 root：跳过依赖安装（要完整准备请 sudo winbox lg-prepare）'
+fi
+
+# ── 2) KVMFR 模块 ─────────────────────────────────────────────────────────
+wb_step '2/3' 'KVMFR 内核模块'
+if (( SKIP_KVMFR )); then
+  wb_log '  （按参数跳过）'
+elif (( is_root )); then
+  if [[ $(wb_kvmfr_state) == ok && -z $SIZE ]]; then
+    wb_ok "已就绪：$KVMFR_DEV（size=$(wb_kvmfr_size_mb)MB）—— 要改大小用 --size 或先 lg-prepare --size N"
+  else
+    wb_kvmfr_install "${SIZE:-}"
+  fi
+else
+  case $(wb_kvmfr_state) in
+    ok) wb_ok "$KVMFR_DEV 已就绪（size=$(wb_kvmfr_size_mb)MB）" ;;
+    *)  wb_warn '非 root：跳过 KVMFR 安装（要完整准备请 sudo winbox lg-prepare）' ;;
+  esac
+fi
+
+# ── 3) 客户端 ─────────────────────────────────────────────────────────────
+wb_step '3/3' '构建 Looking Glass 客户端'
+if (( SKIP_BUILD )); then
+  wb_log '  （按参数跳过）'
+else
+  bin=$(wb_lg_client_bin)
+  if [[ -x $bin ]]; then
+    wb_ok "已存在: $bin（要重建请先删掉它，或直接跑 cmake --build）"
+    "$bin" --version 2>&1 | head -2 | sed 's/^/      /' || true
+  else
+    wb_lg_build
+  fi
+fi
+
+echo >&2
+wb_ok 'lg-prepare 完成'
+wb_hint "下一步: sudo winbox lg-shmem${SIZE:+ --size $SIZE}   （把共享内存设备挂进 VM）"
+wb_hint '尺寸约定：1080p→32，1440p→64，4K→128（必须与 kvmfr 模块参数一致）'

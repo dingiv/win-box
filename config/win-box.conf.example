@@ -72,8 +72,11 @@ WB_LG_SRC=third_party/LookingGlass
 WB_LG_CLIENT=/home/你的用户名/.local/bin/looking-glass-client
 
 # ── 客机交互通道（留空 = 相关检查在 status 里降级为 ⚠ 并跳过）─────────────
+# 客机装微软官方 OpenSSH Server + 专用密钥（比注入按键/HTTP 回传可靠得多）
 WB_GUEST_USER=
 WB_GUEST_HOST=
+WB_GUEST_KEY=~/.ssh/vm-win11
+WB_GUEST_PORT=22
 
 # ── 复位轮回 ──────────────────────────────────────────────────────────────
 # amdgpu 接管后等待初始化的秒数（太短会导致复位不彻底）

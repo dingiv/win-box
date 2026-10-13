@@ -38,7 +38,7 @@ else
 fi
 
 printf '\n== 3. 函数库可独立 source ==\n'
-for lib in log sys conf detect pci gpu; do
+for lib in log sys conf detect pci gpu xml guest lg; do
   if bash -c "source '$WB_ROOT/scripts/lib/$lib.sh' && declare -F | grep -q wb_" 2>/dev/null; then
     ok "lib/$lib.sh 可单独 source"
   else
@@ -47,7 +47,7 @@ for lib in log sys conf detect pci gpu; do
 done
 
 printf '\n== 4. 契约要求的函数都在 ==\n'
-WB_ALL_LIBS="source $WB_ROOT/scripts/lib/log.sh; source $WB_ROOT/scripts/lib/sys.sh; source $WB_ROOT/scripts/lib/conf.sh; source $WB_ROOT/scripts/lib/detect.sh; source $WB_ROOT/scripts/lib/pci.sh; source $WB_ROOT/scripts/lib/gpu.sh"
+WB_ALL_LIBS="source $WB_ROOT/scripts/lib/log.sh; source $WB_ROOT/scripts/lib/sys.sh; source $WB_ROOT/scripts/lib/conf.sh; source $WB_ROOT/scripts/lib/detect.sh; source $WB_ROOT/scripts/lib/pci.sh; source $WB_ROOT/scripts/lib/gpu.sh; source $WB_ROOT/scripts/lib/xml.sh; source $WB_ROOT/scripts/lib/guest.sh; source $WB_ROOT/scripts/lib/lg.sh"
 for fn in wb_log wb_step wb_ok wb_warn wb_fail wb_run wb_write wb_capture \
           wb_is_dry_run wb_is_yes wb_have_cmd wb_require_cmd wb_require_root \
           wb_require_file wb_require_dir wb_confirm \
@@ -59,7 +59,17 @@ for fn in wb_log wb_step wb_ok wb_warn wb_fail wb_run wb_write wb_capture \
           wb_detect_submodules wb_detect_libvirt_tools \
           wb_pci_exists wb_pci_driver wb_pci_override wb_pci_override_clear \
           wb_pci_unbind wb_pci_probe wb_pci_bind wb_pci_wait_driver \
-          wb_gpu_reset_cycle wb_gpu_deploy_rom wb_gpu_rom_fingerprint wb_gpu_bind_vfio; do
+          wb_gpu_reset_cycle wb_gpu_deploy_rom wb_gpu_rom_fingerprint wb_gpu_bind_vfio \
+          wb_xml_render wb_xml_render_file wb_xml_render_fragment wb_xml_template_path \
+          wb_xml_vars_init wb_xml_prepare_fragments wb_xml_dump wb_xml_define \
+          wb_xml_require_stopped wb_vm_redeploy wb_vm_verify_xml wb_vm_set_video_mode \
+          wb_vm_attach_igpu wb_vm_detach_igpu wb_vm_attach_shmem wb_vm_detach_shmem \
+          wb_guest_configured wb_guest_ready wb_guest_ps wb_guest_put \
+          wb_guest_gpu_status wb_guest_idd_status \
+          wb_kvmfr_state wb_kvmfr_check wb_kvmfr_size_mb wb_kvmfr_install \
+          wb_lg_src_dir wb_lg_client_bin wb_lg_deps_install wb_lg_build_check wb_lg_build \
+          wb_lg_client_ini_write wb_lg_run wb_lg_permissions_fix wb_lg_permissions_state \
+          wb_idd_prefs_apply; do
   if bash -c "$WB_ALL_LIBS; declare -F $fn >/dev/null" 2>/dev/null; then
     ok "函数存在: $fn"
   else
@@ -340,7 +350,8 @@ if [[ -n $GBDF ]]; then
   sed -e '/^WB_VBIOS_DIR=/d' -e '/^WB_GPU_BDF=/d' -e '/^WB_AUDIO_BDF=/d' "$RENDER_CONF" > "$TMP/attach.conf"
   {
     printf 'WB_VBIOS_DIR=%s\n' "$VBD"
-    printf 'WB_VBIOS_GPU=vbios.rom\n' 'WB_VBIOS_AUDIO=audio.rom'
+    printf 'WB_VBIOS_GPU=vbios.rom\n'
+    printf 'WB_VBIOS_AUDIO=audio.rom\n'
     printf 'WB_GPU_BDF=%s\n' "$GBDF"
     [[ -n $ABDF ]] && printf 'WB_AUDIO_BDF=%s\n' "$ABDF"
   } >> "$TMP/attach.conf"
@@ -369,6 +380,86 @@ check '卸载后钩子文件消失' 0 bash -c "[[ ! -e '$HOOKFILE' ]]"
 
 export PATH=$OLD_PATH
 unset WB_CONF_PATH
+
+printf '\n== 17. Looking Glass 链（离线部分）==\n'
+has()   { if [[ $2 == *"$3"* ]]; then ok "$1"; else bad "$1（未找到: $3）"; fi; }
+lacks() { if [[ $2 != *"$3"* ]]; then ok "$1"; else bad "$1（不应出现: $3）"; fi; }
+
+# 17.1 qemu.conf 的 cgroup_device_acl 重写（原来这段是用 python 改配置的）
+lg_lib="export WB_ROOT='$WB_ROOT'; source '$WB_ROOT/scripts/lib/lg.sh'; "
+acl_render() { bash -c "${lg_lib}wb_lg__qemu_conf_acl_render '$1'"; }
+
+printf '%s\n' '# 没有任何 ACL 块' 'some_other = 1' > "$TMP/qemu-noacl.conf"
+printf '%s\n' 'cgroup_device_acl = [' '    "/dev/null", "/dev/kvm",' '    "/dev/mydev"' '    ]' \
+  'log_level = 3' > "$TMP/qemu-hasacl.conf"
+printf '%s\n' '#cgroup_device_acl = [' '#    "/dev/null", "/dev/kvm"' '#    ]' > "$TMP/qemu-commented.conf"
+
+acl_out=$(acl_render "$TMP/qemu-noacl.conf")
+has '无 ACL 块 → 生成白名单块' "$acl_out" 'cgroup_device_acl = ['
+has '无 ACL 块 → 含 /dev/kvmfr0' "$acl_out" '"/dev/kvmfr0"'
+has '无 ACL 块 → 保留原有配置行' "$acl_out" 'some_other = 1'
+has '无 ACL 块 → 含 libvirt 默认设备' "$acl_out" '"/dev/kvm"'
+
+acl_out=$(acl_render "$TMP/qemu-hasacl.conf")
+has '已有 ACL 块 → 保留用户自定义设备' "$acl_out" '"/dev/mydev"'
+has '已有 ACL 块 → 加入 kvmfr0' "$acl_out" '"/dev/kvmfr0"'
+has '已有 ACL 块 → 保留原有项' "$acl_out" '"/dev/kvm"'
+has '已有 ACL 块 → 后续配置行保留' "$acl_out" 'log_level = 3'
+lacks '已有 ACL 块 → kvmfr0 不重复' "$(grep -c '/dev/kvmfr0' <<< "$acl_out")" '2'
+
+acl_out=$(acl_render "$TMP/qemu-commented.conf")
+has '注释掉的 ACL 块 → 被启用' "$acl_out" 'cgroup_device_acl = ['
+has '注释掉的 ACL 块 → 含 kvmfr0' "$acl_out" '"/dev/kvmfr0"'
+lacks '注释掉的 ACL 块 → 不残留注释版本' "$acl_out" '#cgroup_device_acl'
+
+# 17.2 客户端 client.ini（首次生成、不覆盖、--force 覆盖）
+HOMEFAKE="$TMP/home"
+mkdir -p "$HOMEFAKE"
+check '首次生成 client.ini' 0 bash -c "
+  export HOME='$HOMEFAKE' WB_ROOT='$WB_ROOT'
+  source '$WB_ROOT/scripts/lib/lg.sh'
+  wb_lg_client_ini_write"
+INI="$HOMEFAKE/.config/looking-glass/client.ini"
+ini_content=$(cat "$INI" 2>/dev/null)
+has 'client.ini 指定了 shmDevice'  "$ini_content" 'shmDevice=/dev/kvmfr0'
+has 'client.ini 开启 DMA 直导'     "$ini_content" 'allowDMA=yes'
+has 'client.ini 关掉 autoResize（与 setGuestRes 互斥）' "$ini_content" 'autoResize=no'
+has 'client.ini 用抓取模式（多显示器必需）' "$ini_content" 'captureOnFocus=yes'
+printf '%s\n' '; 用户手改' >> "$INI"
+check '已存在时不覆盖（保留手改）' 0 bash -c "
+  export HOME='$HOMEFAKE' WB_ROOT='$WB_ROOT'
+  source '$WB_ROOT/scripts/lib/lg.sh'
+  wb_lg_client_ini_write
+  grep -q '用户手改' '$INI'"
+check '--force 才重置' 0 bash -c "
+  export HOME='$HOMEFAKE' WB_ROOT='$WB_ROOT'
+  source '$WB_ROOT/scripts/lib/lg.sh'
+  wb_lg_client_ini_write --force
+  ! grep -q '用户手改' '$INI'"
+
+# 17.3 KVMFR / 权限状态查询（在本机跑，不假设结果是哪一种）
+check 'wb_kvmfr_state 只输出三者之一' 0 bash -c "
+  export WB_ROOT='$WB_ROOT'
+  source '$WB_ROOT/scripts/lib/lg.sh'
+  [[ \$(wb_kvmfr_state) =~ ^(ok|missing|notchardev)\$ ]]"
+check 'wb_lg_permissions_state 输出两个字段' 0 bash -c "
+  export WB_ROOT='$WB_ROOT'
+  source '$WB_ROOT/scripts/lib/lg.sh'
+  s=\$(wb_lg_permissions_state)
+  [[ \$s == apparmor=* ]] && [[ \$s =~ cgroup=(ok|missing|unknown)\$ ]]"
+
+# 17.4 客机通道未配置时不得当成故障
+check '未配置通道时 wb_guest_configured 返回 1' 1 bash -c "
+  export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$TMP/empty-guest.conf'
+  source '$WB_ROOT/scripts/lib/guest.sh'; wb_conf_load
+  wb_guest_configured"
+check '未配置通道时 wb_guest_ready 返回 1 且不报错' 1 bash -c "
+  export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$TMP/empty-guest.conf'
+  source '$WB_ROOT/scripts/lib/guest.sh'; wb_conf_load
+  wb_guest_ready"
+check '客户端未构建时 winbox lg 报码 3' 3 bash -c "
+  export WB_ROOT='$WB_ROOT' WB_CONF_PATH='$TMP/render.conf' WB_LG_CLIENT='$TMP/no-such-client'
+  '$WB_ROOT/scripts/bin/winbox' lg"
 
 printf '\n───────────────────────────\n'
 printf '通过: %d   失败: %d\n' "$PASS" "$FAIL"

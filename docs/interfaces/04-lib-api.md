@@ -89,6 +89,8 @@ log.sh ────┘        （log 不被任何库依赖其状态，只输出�
 | `WB_LG_CLIENT` | 客户端二进制路径 | — | 用户 |
 | **客机通道 / 复位** | | | |
 | `WB_GUEST_USER` / `WB_GUEST_HOST` | 客机 SSH（空 = 相关检查降级为 ⚠ 并跳过） | 空 | 用户 |
+| `WB_GUEST_KEY` | 客机 SSH 私钥（支持 `~/`） | `~/.ssh/vm-win11` | 用户 |
+| `WB_GUEST_PORT` | 客机 SSH 端口 | `22` | 用户 |
 | `WB_REBOOT_WAIT` | 复位时等 amdgpu 初始化的秒数 | `30` | 用户 |
 
 ## `lib/sys.sh` — 环境守卫
@@ -200,12 +202,26 @@ config/domain.local.xml                  可选：用户改过的骨架副本（
 
 | 函数 | 语义 | 失败 |
 | --- | --- | --- |
-| `wb_kvmfr_install SIZE_MB` | DKMS 安装 kvmfr + 写模块参数/开机加载/udev 规则 | 码 3 = VM 运行中 |
-| `wb_kvmfr_check` | 检查 `/dev/kvmfr0` 存在且**是字符设备**（QEMU 误建普通文件是已知坑） | 码 3 |
-| `wb_lg_build SRC` | 从 submodule 源码构建客户端，产物 → `WB_LG_CLIENT` | 码 3 = 缺构建依赖 |
-| `wb_lg_run [args…]` | 前台运行客户端；首次生成 `client.ini` | 码 3 = 未构建 |
-| `wb_lg_client_ini_write` | 写默认 `client.ini`（lgmp + DMA + 分辨率策略） | 已存在则不覆盖（除非 `--force`） |
-| `wb_idd_prefs_apply` | 经客机 SSH 改 IDD 注册表偏好并重载驱动 | 码 3 = 无 SSH 通道 |
+| `wb_kvmfr_state` | stdout = `ok` / `missing` / `notchardev`（**不退出**，供 status 与分支使用） | — |
+| `wb_kvmfr_check` | 不可用即报码 3，并给出具体修法 | 码 3 |
+| `wb_kvmfr_size_mb` | stdout = 共享内存大小（MB）：sysfs 参数 → `/etc/modprobe.d/kvmfr.conf` → 空 | — |
+| `wb_kvmfr_install [SIZE_MB]` | DKMS 安装 + 模块参数/开机加载/udev 权限 + 加载并校验；含“QEMU 把设备建成了普通文件”的自愈 | 码 1/3 |
+| `wb_lg_deps_install` | 构建依赖（逐包 `dpkg -s` 判定，幂等） | 码 1 |
+| `wb_lg_build_check` | 检查 CMake 真正需要的 pkg-config 模块（官方清单漏了 fontconfig/samplerate/pipewire/fuse3） | 码 3 |
+| `wb_lg_build [SRC]` | cmake + build + install 到 `$HOME/.local`（**不需 root**） | 码 1/3 |
+| `wb_lg_client_ini_write [--force]` | 写 `~/.config/looking-glass/client.ini`（lgmp + `shmDevice=/dev/kvmfr0` + DMA + 抓取模式）；**已存在则不覆盖** | — |
+| `wb_lg_run [args…]` | 前台运行客户端（`exec`），首次自动生成 ini | 码 3 |
+| `wb_lg_permissions_state` | stdout = `apparmor=ok\|missing\|unknown cgroup=ok\|missing\|unknown` | — |
+| `wb_lg_permissions_fix` | 放行两层权限（AppArmor + `qemu.conf` 的 `cgroup_device_acl`）并重启 libvirtd | 码 1 |
+| `wb_idd_prefs_apply` | 经客机 SSH 写 IDD 三个关键偏好并重载驱动 | 码 3 = 无通道 |
+
+**三个实测细节（写进实现，否则会误判）**：
+
+1. **`static_size_mb` 在 sysfs 里可能不存在**：本版本 kvmfr 用 `module_param_array(..., 0000)` 声明，
+   权限 0000 → sysfs 不出现该文件。因此大小按 “sysfs → modprobe 配置” 回退，读不到就**警告而非失败**。
+2. **`/etc/libvirt/qemu.conf` 是 `600 root`**：非 root **读不到**它，不能把“读不到”当成“没配置”。
+   故状态值有三态：`ok` / `missing` / `unknown`；`unknown` 时非 root 直接报码 3（要求用 sudo 确认）。
+3. **判据是 errno**：`EACCES` → AppArmor 未放行；`EPERM` → cgroup 设备白名单未登记。
 
 ## `lib/guest.sh` — 客机交互（经 SSH）
 
